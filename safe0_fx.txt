@@ -1,0 +1,13 @@
+# OLA 6c (H5FX=1): stubs que devuelven 0 en el camino de FX (sin el subsistema detras en el harness)
+FX_CreateDevGui()
+GlassCl_GenerateVerts(int, unsigned int)
+R_WaterSimulationGetAverageHeight(float*)
+Phys_ObjCreate(int, float const*, float const*, float const*, PhysPreset const*, gjk_geom_list_t*, bool, int)
+FX_IsDemoPlaying()
+Demo_IsPlaying()
+Sys_AssistAndWaitWorkerCmdInternal(jqWorkerCmd*)
+CG_SP_VisualsEnabled()
+R_MarkFragments_Begin(MarkInfo*, MarkFragmentsAgainstEnum, float const*, float const (*) [3], float, float const*, Material*)
+R_MarkFragments_Go(MarkInfo*, void (*)(void*, int, FxMarkTri*, int, FxMarkPoint*, float const*, float const*, float const*, bool), void*, int, FxMarkTri*, int, FxMarkPoint*)
+# OLA 7d: R_MarkFragments_Go pregunta por cristales rompibles en la caja de la marca; sin sistema de cristal -> 0 cristales
+GlassCl_AreaGlasses(float const*, float const*, Glass const**, unsigned int)

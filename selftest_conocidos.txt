@@ -1,0 +1,10 @@
+# selftest_mac.sh: lineas de error CONOCIDAS (ya estaban antes de la ola 15A; no son fallos de la integracion). Una subcadena por linea.
+# Los numeros de las lineas de error se cambian por N antes de comparar.
+[ERROR] couldn't open 'shock/
+[ERROR] couldn't exec devgui_fx
+# La VO de inicio/personajes no esta en los datos del usuario (hallazgo de la ola 14)
+Could not open streaming sound english\sound\vox\
+Tried to play streamed sound 'english\sound\vox\
+# Resumen del arnes de builtins de GSC sin portar y errores de script (existian antes de la 15A; el detalle va en el log)
+[HNG-FALTAN]
+[HNG-ERRORES]

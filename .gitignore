@@ -1,0 +1,30 @@
+# salidas de build.sh (out, out_vk_*, out_app_*, out_ndk_*) y de las pruebas
+out
+out_*/
+*.o
+*.a
+*.so
+*.apk
+*.idsig
+p3
+# logs, capturas, volcados y caches (se regeneran; pueden ser grandes)
+*.log
+*.png
+*.jpg
+*.wav
+*.csv
+selftest_out/
+v9cache/
+*.spvc
+*.pak
+*.pkg
+# datos del juego del usuario: nunca en git
+*.iwd
+*.ff
+gamedata/
+# copias de seguridad de cada ola
+*.bak*
+.DS_Store
+# volcados accidentales de datos del juego (p.ej. entidades del mapa)
+/1
+mapents*.txt

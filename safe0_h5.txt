@@ -1,0 +1,127 @@
+# H5G (servidor original dedicado): stubs que devuelven 0 en vez de abortar. Solo se usan con H5G=1.
+# Vehiculos fisicos (Nitrous): zombie_pentagon no tiene vehiculos conducibles; sin fisica portada.
+VehicleParameter::VehicleParameter()
+# El harness no carga el front-end (zonas de UI): nada que descargar.
+Com_UnloadFrontEnd()
+# Cliente local inexistente (servidor dedicado): memoria de cgame/fx/ik del cliente no se usa.
+FX_FreeClientMemory(HunkUser*)
+CG_FreeClientMemory(HunkUser*, int)
+CG_AllocateClientMemory_SizeRequired(int)
+FX_AllocateClientMemory_SizeRequired(int)
+CG_AllocateClientMemory(HunkUser*, int)
+FX_AllocateClientMemory(HunkUser*, int)
+# Perfilado de carga, Steam, eventos de hilos y keep-alive de la ventana: sin efecto en el harness (un hilo, sin Steam).
+ProfLoad_Activate()
+ProfLoad_Deactivate()
+LiveSteam_Server_Init()
+Sys_InitServerEvents()
+Sys_LoadingKeepAlive()
+# FS: las zonas ya estan cargadas por main2 (mapIsPreloaded=1) y el FS real no se compila.
+FS_Restart(int, int)
+# Cola de guardado SP: g_sp_savegame no se compila (layout x86); sin guardados en H5a.
+G_SP_ClearSaveGameQueue()
+# Modo de juego personalizado de la UI (customGameMode 0 en un servidor de zombies): UI_Gametype_IsUsingCustom() es falso y no hace nada.
+UI_Gametype_CustomGameModeDataToDvars()
+# Red del Live/SocketRouter: el servidor local no abre sockets (NET_Init vacio).
+SocketRouter_EmergencyFrame()
+# Trazas de depuracion de bancos de sonido del mod (solo log): sin sonido en el servidor dedicado.
+SND_BO1TraceInit()
+SND_BO1TraceBanks(char const*)
+# Enlace en vivo con Radiant (editor): sin editor conectado no hace nada.
+RadiantRemoteInit()
+RunSavedRadiantCmds()
+# Volcado de dvars al log (solo con com_dumpDvars / depuracion).
+Com_DvarDump(int, char const*)
+# (CG_SetupWeaponDef ya no es stub: H5e compila cgame/cg_weapons.cpp para el viewmodel; corre la original desde G_InitGame.)
+# Errores diferidos: el Com_Error del harness termina el proceso en el acto, nunca queda un error pendiente para el longjmp.
+Com_CheckError()
+# Datos de depuracion servidor->cliente (cl_debugdata): sin cliente local.
+CL_FlushDebugServerData()
+SND_BO1TraceSetTime(bool, int)
+# Sin BO1_DW_TASK (tareas DemonWare en linea) el cuerpo original queda vacio
+TaskManager2_PickUpDeferredTasks()
+# Dvar_InfoString(0, 4) (SV_SaveSystemInfo) toma la conexion del cliente local pero solo la usa con bit 2 (userinfo); servidor sin cliente.
+CL_GetLocalClientConnection(int)
+# Datos de depuracion del servidor para el cliente local (cl_debugdata): sin cliente.
+CL_UpdateDebugServerData()
+# Sin grabacion de demo (Demo_IsEnabled falso en el servidor dedicado): el original devuelve 0.
+Demo_ShouldBuildDemoSnapshot()
+# Edicion en vivo desde Radiant (radiant_remote): no hay Radiant conectado.
+G_ProcessRadiantCmds()
+# Steam (callbacks de servidor y comprobacion de clientes): sin Steam en el harness.
+LiveSteam_Server_RunCallbacks()
+Steam_CheckClients()
+# Aviso en pantalla del monitor de estadisticas (UI de cliente).
+StatMon_Warning(int, int, char*)
+# Notificacion de salida del modo headless del mod (bo1_quitnotify vacio: el original vuelve sin hacer nada).
+Sys_HeadlessLevelNotify(char const*)
+# Trazas de diagnostico de sonido del mod (bo1_audio): solo registran, sin efecto en el juego.
+SND_BO1Trace(char const*, char const*, unsigned int, int, float const*, char const*)
+SND_BO1TraceText(char const*, ...)
+# physGlob.timeLastUpdate: la fisica Nitrous del servidor no se ejecuta en H5 (sin portar); sin fisica el reloj es 0. PENDIENTE H5b.
+Phys_GetCurrentTime()
+# H5b (jugador de prueba SV_AddTestClient): amigos de Steam para el nombre del bot (0 = sin amigos -> SV_BotNameRandom, el caso sin Steam).
+Friends_GetCount(int, int)
+# Demo (grabacion/reproduccion): no hay demo en curso.
+Demo_ClientConnected(int)
+Demo_IsPaused()
+# Partes del gamestate que solo lee un cliente con cgame (cuerdas/dynents del cliente, partida personalizada de la UI): el bot no las lee.
+DynEnt_WriteGameState(msg_t*)
+Rope_WriteGameState(msg_t*)
+UI_Gametype_Custom_WriteClientData(msg_t*)
+# Consola del cliente (impresion rapida): sin cliente local.
+CG_QuickPrintFlush()
+# Direccion del bot (NA_BOT) no es LAN (win_net.cpp: solo NA_LOOPBACK/redes privadas).
+Sys_IsLANAddress(netadr_t)
+# Traza de red del mod (diagnostico) y medicion de sonido headless del mod: sin efecto.
+CG_SP_NetTraceServerCmd(client_t const*, usercmd_s const*)
+SND_BO1TraceEnabled()
+SND_BO1NoDeviceAliasExists(char const*)
+# Mapa de zombies en pantalla (UI del cliente, pentagon no lo usa en el Pmove del servidor): no se muestra.
+CG_IsShowingZombieMap()
+# FX del cliente en el servidor: el caso de servidor dedicado KB (sin FxSystem de cliente) que el propio codigo documenta (visibilidad 1).
+FX_GetSystemRemote(int)
+# Guardado SP (g_sp_savegame no se compila: layout x86 y zombies no guarda): el script recibe 0.
+G_SP_SaveGame(char const*, char const*, char const*, int, int, bool, int, void (*)(), int)
+# Sin sistema de sonido (ola 7): ningun alias existe -> soundexists() devuelve falso. PENDIENTE ola 7.
+SND_FindAlias(char const*)
+# H5d: sin BO1_LIVE el cuerpo original de SV_DWWriteClientStats (live_storage_win.cpp) esta vacio (escritura de estadisticas a demonware).
+SV_DWWriteClientStats(client_t*)
+# H5e: sonidos de notetrack del viewmodel (cg_sound): sin audio en el harness; los sonidos del arma son de una ola posterior.
+CG_PlayClientSoundNoteTracks(int, int, float*, char const*, bool)
+# OLA 13 (HUD original, h13_hud.cpp): CG_RegisterDvars llama a esto; el cliente de DynEntity (fisica Nitrous) no esta portado y nadie lee sus dvars
+DynEntCl_RegisterDvars()
+# OLA 13 (HUD original, CG_Draw2D): partes del cliente sin equivalente en el harness (demos/killcam, consola de chat, nombres
+# sobre jugadores, flashbang, extracam, lagometro, depuracion). 0 = lo que el original hace sin esas funciones activas.
+CG_CompassUpdateActors(int)
+CG_DrawCrosshairNames(int)
+CG_DrawDebugOverlays(int)
+CG_DrawEntityCount(int)
+CG_DrawFriendlyNames(int)
+CG_DrawLagometer(int)
+CG_DrawNames(int)
+CG_DrawServerBandwidth(int)
+CG_DrawServerKillcamData(int)
+CG_ExtraCamIsActive(int)
+CG_Flared(int)
+CG_Flashbanged(int)
+CG_ScanForCrosshairEntity(int)
+CG_SP_UpdateTimeScaleLerp(int)
+Con_DrawErrors(int, int, int, float)
+Con_DrawGameMessageWindow(int, unsigned int, int, int, int, int, Font_s*, float, float*, int, char, msgwnd_mode_t)
+Con_DrawSay(int, int, int)
+Demo_DrawMetaInformationScreen(int)
+Demo_DrawTransitionScreen(int)
+Demo_IsDemoHudHidden()
+Demo_IsGameHudHidden()
+Demo_IsMovieCamera()
+Demo_IsRenderingMovie()
+Demo_IsThirdPersonCamera()
+Demo_UpdateVisibilityBitsForCameraMode(int, int)
+Live_IsWagerMatch()
+Sys_HeadlessNoteHud(int, bool)
+UI_Project_OwnerDraw(int, itemDef_s*, float, float, float, float, int, int, int, int, float*, Material*, rectDef_s, char const*)
+UI_Project_OwnerDrawText(int, int, itemDef_s*, float, float, float, float, int, int, float, float, int, int, int, Font_s*, float, float*, Material*, int, rectDef_s, char)
+# OLA 13: fin de partida (intermission) -> CG_Draw2DInternal pide el menu de marcador/fin. Abrir menus es de la UI (OLA 10); sin ella,
+# 0 = no se abre ninguno y siguen los hudelems de "Game Over" del GSC.
+UI_SetActiveMenu(int, uiMenuCommand_t)
