@@ -73,7 +73,10 @@ static H15Mem H15Read()
     return m;
 }
 static std::atomic<const char *> s_h15Phase{ "arranque" }; static FILE *s_h15Csv; static long s_h15Peak; static const char *s_h15PeakPhase = "arranque";
-static bool H15On() { static int on = -1; if (on < 0) { const char *e = getenv("H15_MEMPROFILE"); on = e && *e && strcmp(e, "0"); } return on > 0; }
+// OLA 16: en Android el constructor corre al cargar libmain.so, ANTES de que android_main ponga las variables (debug.bo1.env): mientras
+// este apagado se vuelve a leer la variable, y el hilo de muestras arranca en la primera fase si no arranco en el constructor.
+static bool H15On() { static int on = -1; if (on <= 0) { const char *e = getenv("H15_MEMPROFILE"); on = e && *e && strcmp(e, "0"); } return on > 0; }
+static void H15Begin();
 static long H15Ms() { timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L; }
 static void H15Log(const char *why)
 {
@@ -92,7 +95,7 @@ static void H15Log(const char *why)
 extern "C" void H15_MemPhase(const char *phase)   // fases: el texto debe vivir siempre (literal o static)
 {
     if (!H15On()) return;
-    s_h15Phase.store(phase); H15Log("FASE");
+    H15Begin(); s_h15Phase.store(phase); H15Log("FASE");
 }
 static void *H15Thread(void *)
 {
@@ -100,11 +103,12 @@ static void *H15Thread(void *)
     for (;;) { usleep((useconds_t)(ms > 50 ? ms : 50) * 1000); H15Log("muestra"); }
     return nullptr;
 }
-__attribute__((constructor(103))) static void H15Start()
+static void H15BeginOnce()
 {
-    if (!H15On()) return;
     const char *e = getenv("H15_MEMPROFILE");
     if (strcmp(e, "1")) { s_h15Csv = fopen(e, "w"); if (s_h15Csv) fprintf(s_h15Csv, "t_ms,motivo,fase,rss_kb,anon_kb,file_kb,shmem_kb,vss_kb,hwm_kb,heap_kb\n"); }
     atexit([] { H15Log("SALIDA"); });
     pthread_t t; pthread_create(&t, nullptr, H15Thread, nullptr); pthread_detach(t);
 }
+static void H15Begin() { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, H15BeginOnce); }
+__attribute__((constructor(103))) static void H15Start() { if (H15On()) H15Begin(); }
