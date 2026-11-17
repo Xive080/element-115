@@ -327,6 +327,7 @@ static DObj *H5W_Update()
 static void H5W_DrawViewModel(unsigned char techType)
 {
     if (g_h5wPrevDraw) g_h5wPrevDraw(techType);
+    { void H4_DrawTranslucentOnce(unsigned char); H4_DrawTranslucentOnce(techType); }   // OLA 15B: cristal translucido antes del depth hack
     g_h5wSurfs = 0;
     DObj *obj = H5W_Update();
     if (!obj) return;

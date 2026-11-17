@@ -177,8 +177,12 @@ static void H12_SetupTransOrder()
         g_trans.push_back({ ei, gr }); skip += std::to_string(mi) + ","; }
     if (g_trans.empty()) return;
     setenv("H7C_BMODEL_SKIP", skip.c_str(), 1);
-    extern void (*g_h4DrawExtra)(unsigned char techType); g_h12PrevDraw = g_h4DrawExtra; g_h4DrawExtra = H12_DrawTrans;
-    fprintf(stderr, "[H12] orden translucido: %zu secciones de cristal se dibujan despues de los actores (H12_GLASSORDER=0 lo quita)\n", g_trans.size());
+    // OLA 15B: en el pase translucido (world_h4.cpp g_h4DrawTranslucent), antes del viewmodel. Antes envolvia g_h4DrawExtra y quedaba
+    // DESPUES del viewmodel, que borra la profundidad: los cristales de cualquier ventana se veian a traves de suelos y paredes.
+    extern void (*g_h4DrawTranslucent)(unsigned char techType); extern void (*g_h4DrawExtra)(unsigned char techType);
+    if (EnvI("H15_OLDORDER", 0)) { g_h12PrevDraw = g_h4DrawExtra; g_h4DrawExtra = H12_DrawTrans; }   // diagnostico: orden anterior (tras el viewmodel) para comparar
+    else { g_h12PrevDraw = g_h4DrawTranslucent; g_h4DrawTranslucent = H12_DrawTrans; }
+    fprintf(stderr, "[H12] orden translucido: %zu secciones de cristal se dibujan despues de los actores y antes del viewmodel (H12_GLASSORDER=0 lo quita)\n", g_trans.size());
 }
 
 // estado visible de un tablon: V = se dibuja, h = oculto (Hide: EF_NODRAW 0x20), x = borrado; m = fuera de su sitio. Seccion intacta: U/u/-

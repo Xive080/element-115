@@ -321,6 +321,10 @@ static bool Setup(int W, int H)
             { "cg_ScoresColor_Transparency", "0.35" } };
         for (auto &e : kv) if (Dvar_FindVar(e[0])) Dvar_SetFromStringByName(e[0], (char *)e[1]);
     }
+    // OLA 15E: alto del marcador SP (330, texto 0.62) que pone CG_Init en zombiemode; el arnes no corre CG_Init y quedaba el de MP
+    // (435): el marcador salia ~50 u mas arriba y pisaba GAME OVER / You Survived. H13_SBDVARS=0 lo quita.
+    { extern const dvar_t *cg_scoreboardHeight; void CG_SP_SetupScoreboardDvars();
+      if (EnvOn("H13_SBDVARS", true) && cg_scoreboardHeight && zombiemode && zombiemode->current.enabled) CG_SP_SetupScoreboardDvars(); }
     // dvars de TUs no compiladas que CG_Draw2D lee por puntero (mismos parametros que el original)
     { extern const dvar_s *ui_showEndOfGame; if (!ui_showEndOfGame) ui_showEndOfGame = _Dvar_RegisterBool("ui_showEndOfGame", 0, 0, "Currently showing the end of game menu."); }   // ui_main_mp.cpp (UI_Project_RegisterDvars)
     if (!com_sv_running) com_sv_running = _Dvar_RegisterBool("sv_running", 0, 0x40u, "Server is running");   // common.cpp
@@ -366,14 +370,18 @@ static void (*s_h13PrevCmd)(const client_t *, const char *);
 static std::mutex s_h13CmdMx; static std::vector<std::string> s_h13Cmds;
 static void H13_ServerCmd(const client_t *c, const char *cmd)
 {
-    if (s_h13PrevCmd) s_h13PrevCmd(c, cmd);
+    // h7e_light reinstala su gancho cada frame encadenando al anterior; con el nuestro encadenado al suyo queda un ciclo
+    // H13 -> h7e -> H13: el guardia corta la vuelta (cada gancho corre una vez por orden).
+    static thread_local bool inside; if (inside) return;
+    inside = true; if (s_h13PrevCmd) s_h13PrevCmd(c, cmd); inside = false;
     if (!c || !cmd || cmd[0] != 'v' || cmd[1] != ' ' || c != &svs.clients[0]) return;
     std::lock_guard<std::mutex> l(s_h13CmdMx); s_h13Cmds.push_back(cmd + 2);
 }
 static void H13_RunClientDvars()
 {
     static const bool on = EnvOn("H13_CLDVARS", true); if (!on) return;
-    if (g_h0ServerCmdHook != H13_ServerCmd) { s_h13PrevCmd = g_h0ServerCmdHook; g_h0ServerCmdHook = H13_ServerCmd; }
+    // Una sola vez: otros ganchos (h7e_light) se encadenan detras del nuestro; reinstalar cada frame hacia un ciclo (recursion infinita).
+    static bool inst; if (!inst) { inst = true; s_h13PrevCmd = g_h0ServerCmdHook; g_h0ServerCmdHook = H13_ServerCmd; }
     std::vector<std::string> q; { std::lock_guard<std::mutex> l(s_h13CmdMx); q.swap(s_h13Cmds); }
     for (const std::string &line : q) {
         std::vector<std::string> tok; const char *p = line.c_str();

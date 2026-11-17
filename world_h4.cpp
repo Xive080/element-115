@@ -258,6 +258,12 @@ void H4_DrawSurfsPlaced(Material *m, const unsigned short *surfs, int n, unsigne
 // H5b: superficie XModel ya deformada en CPU (vertices en mundo, colocacion identidad). Mismo orden de estado que
 // R_TessXModelSkinnedDrawSurfList (rb_tess.cpp) -> R_DrawXModelSkinnedUncached, sin la luz de modelo (lightgrid sin portar).
 void (*g_h4DrawExtra)(unsigned char techType);
+// OLA 15B: pase translucido del mundo (cristal de las ventanas, h12_barrier.cpp). Va tras los actores y ANTES del viewmodel: el viewmodel
+// borra la profundidad (depth hack) y lo que se dibujara despues saldria encima de todo (los rombos oscuros del suelo eran cristales de
+// ventanas de otras salas vistos a traves del suelo). H5W_DrawViewModel lo llama antes de borrar; si no hay viewmodel, RenderFrame.
+void (*g_h4DrawTranslucent)(unsigned char techType);
+static bool g_h4TransDone;
+void H4_DrawTranslucentOnce(unsigned char techType) { if (g_h4DrawTranslucent && !g_h4TransDone) { g_h4TransDone = true; g_h4DrawTranslucent(techType); } }
 static GfxImage *g_h4ModelLight;   // luz de modelo neutra (H4_NeutralModelLighting) o atlas del lightgrid (h5_light.cpp)
 // OLA 6b (h5_light.cpp): atlas de luz de modelo del lightgrid ORIGINAL. g_h4ModelLightImage lo crea; antes de cada modelo el llamador
 // pone sus coordenadas (CONST_SRC_CODE_BASE_LIGHTING_COORDS) y la tecnica lit segun su luz primaria (10 ninguna, 11 sol).
@@ -417,7 +423,10 @@ static void RenderFrame(GfxWorld *w, const Cam &cam, int W, int H, float fovX, u
       for (size_t b = (size_t)sb; b < g_batches.size() && (long)b < sb + mb; ++b) if (g_prim[b][0]) DrawBatch(b, techType); }
     { extern void H7C_DrawWorldExtra(unsigned char) __attribute__((weak)); if (H7C_DrawWorldExtra) H7C_DrawWorldExtra(techType); }   // OLA 7c: brushmodels/smodels
     g_h4SkinnedDrawn = g_h4SkinnedSkipped = 0;
-    if (g_h4DrawExtra) g_h4DrawExtra(techType);   // H5b: actores del servidor (h5_game.cpp)
+    static const int noExtra = getenv("H15_NOEXTRA") ? atoi(getenv("H15_NOEXTRA")) : 0;   // OLA 15B (diagnostico): 1 = sin cadena g_h4DrawExtra
+    g_h4TransDone = false;
+    if (g_h4DrawExtra && !noExtra) g_h4DrawExtra(techType);   // H5b: actores del servidor (h5_game.cpp)
+    H4_DrawTranslucentOnce(techType);   // OLA 15B: si no lo dibujo ya el viewmodel
     { extern void H7_PostFX() __attribute__((weak)); if (H7_PostFX) H7_PostFX(); }   // OLA 7g: RB_BloomLDR original (bloom + curva + color del vision set)
 }
 
@@ -548,12 +557,27 @@ bool H4_Setup(int W, int H)
     { extern void H7_LoadHighMips() __attribute__((weak)); if (H7_LoadHighMips) H7_LoadHighMips(); extern void H7_LightmapInfo(GfxWorld *) __attribute__((weak)); if (H7_LightmapInfo) H7_LightmapInfo(w); extern void H7_DumpRaw() __attribute__((weak)); if (H7_DumpRaw) H7_DumpRaw(); extern void H7_ApplyVision(GfxWorld *) __attribute__((weak)); if (H7_ApplyVision) H7_ApplyVision(w); extern void H7_FindConst() __attribute__((weak)); if (H7_FindConst) H7_FindConst(); }   // OLA 7g: niveles de streaming (h7_gfx.cpp)
     { extern void H7C_Setup(GfxWorld *) __attribute__((weak)); if (H7C_Setup) H7C_Setup(w); }   // OLA 7c (h7c_gfx.cpp)
     { extern void H7E_Setup(GfxWorld *) __attribute__((weak)); if (H7E_Setup) H7E_Setup(w); }   // OLA 7e: luz de la sala (h7e_light.cpp)
+    { extern void H9_Setup(GfxWorld *) __attribute__((weak)); if (H9_Setup) H9_Setup(w); }   // OLA 9 (h9_shadow.cpp)
     R_BeginFrame(); R_BeginSharedCmdList(); R_AddCmdProjectionSet2D(); R_EndFrame(); R_IssueRenderCommands(3u);   // marco vacio previo: estado inicial del backend
     rgp.world = w; g_worldDraw = &w->draw; g_worldDpvs = &w->dpvs; g_worldDpvsPlanes = &w->dpvsPlanes;
     for (unsigned i = 0; i < g_worldDraw->reflectionProbeCount; ++i)
         g_worldDraw->reflectionProbeTextures[i].basemap = g_worldDraw->reflectionProbes[i].reflectionImage->texture.basemap;
     if (const char *e = getenv("H15_PROBE")) for (unsigned i = 0, k = (unsigned)atoi(e); i < g_worldDraw->reflectionProbeCount && k < g_worldDraw->reflectionProbeCount; ++i)   // OLA 15B (diagnostico): todas las sondas = la k
         g_worldDraw->reflectionProbeTextures[i].basemap = g_worldDraw->reflectionProbes[k].reflectionImage->texture.basemap;
+    if (getenv("H15_PROBEFILL")) for (unsigned i = 0; i < g_worldDraw->reflectionProbeCount; ++i) {   // OLA 15B (diagnostico): cada cara de cada sonda de un color (+X rojo -X verde +Y azul -Y amarillo +Z blanco -Z negro)
+        GfxImage *im = g_worldDraw->reflectionProbes[i].reflectionImage; if (!im || !im->texture.cubemap) continue;
+        static const unsigned col[6] = { 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00, 0xFFFFFFFF, 0xFF000000 };
+        struct TCubeV : IDirect3DCubeTexture9 { void *g; int id; UINT e, levels; D3DFORMAT fmt; };   // misma forma que TCube (trace.cpp): GetLevelDesc/GetLevelCount del cubo no estan implementados
+        const D3DFORMAT f = static_cast<TCubeV *>(im->texture.cubemap.get())->fmt; const unsigned lv = static_cast<TCubeV *>(im->texture.cubemap.get())->levels;   // GetLevelCount del cubo no esta implementado: LockRect falla fuera de rango
+        for (int fc = 0; fc < 6; ++fc) for (unsigned l = 0; l < lv; ++l) { D3DLOCKED_RECT lr; if (im->texture.cubemap->LockRect((D3DCUBEMAP_FACES)fc, l, &lr, nullptr, 0) != 0) continue;
+            const unsigned W = std::max(1u, (unsigned)im->width >> l), v = col[fc]; const unsigned short c = (unsigned short)(((v >> 19) & 31) << 11 | ((v >> 10) & 63) << 5 | ((v >> 3) & 31));
+            if (f == D3DFMT_DXT1 || f == D3DFMT_DXT5) { const unsigned bs = f == D3DFMT_DXT1 ? 8 : 16; unsigned char b[16] = {}; if (bs == 16) b[0] = b[1] = 255; unsigned char *cb = b + bs - 8; cb[0] = cb[2] = c & 255; cb[1] = cb[3] = c >> 8;
+                for (unsigned by = 0; by < (W + 3) / 4; ++by) for (unsigned bx = 0; bx < (W + 3) / 4; ++bx) memcpy((char *)lr.pBits + by * lr.Pitch + bx * bs, b, bs); }
+            else for (unsigned y = 0; y < W; ++y) for (unsigned x = 0; x < W; ++x) ((unsigned *)((char *)lr.pBits + y * lr.Pitch))[x] = v;
+            im->texture.cubemap->UnlockRect((D3DCUBEMAP_FACES)fc, l); }
+        if (i < 3) fprintf(stderr, "[H15] PROBEFILL sonda %u '%s' fmt %d %ux%ux%u mapType %u levelCount %u mips %u tipo %d streaming %u pixels %p\n", i, im->name.get(), (int)f, im->width, im->height, im->depth,
+            im->mapType, im->levelCount, lv, (int)im->texture.basemap->GetType(), im->streaming, (void *)im->pixels.get());
+    }
     for (int i = 0; i < g_worldDraw->lightmapCount; ++i) {
         g_worldDraw->lightmapPrimaryTextures[i].basemap = g_worldDraw->lightmaps[i].primary->texture.basemap;
         g_worldDraw->lightmapSecondaryTextures[i].basemap = g_worldDraw->lightmaps[i].secondary->texture.basemap;
@@ -602,6 +626,12 @@ static void GfxCams()
             double ms = ((b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) * 1e-6) / rep;
             char tag[16]; snprintf(tag, sizeof tag, "_g%d", k); H4_Shot(tag);
             fprintf(stderr, "[GFX] cam %d (%.1f,%.1f,%.1f yaw %.1f pitch %.1f): %.3f ms/frame (media de %d) draws=%d lotes=%d\n", k, c.org[0], c.org[1], c.org[2], c.ang[1], c.ang[0], ms, rep, g_lastDraws, g_drawn);
+            if (const char *px = getenv("H15_PIXEL")) {   // OLA 15B (diagnostico): rayo por los pixeles "x,y;x,y" de la captura -> triangulos del mundo que corta
+                extern void H15_PickRay(const float *, const float *) __attribute__((weak));
+                for (const char *q = px; q && *q; q = strchr(q, ';') ? strchr(q, ';') + 1 : nullptr) { float sx, sy; if (sscanf(q, "%f,%f", &sx, &sy) != 2 || !H15_PickRay) break;
+                    const float tx = tanf(g_fov * 0.5f * (float)M_PI / 180.0f), ty = tx * (float)g_H / (float)g_W, u = (2 * sx / g_W - 1) * tx, v = (1 - 2 * sy / g_H) * ty;
+                    float d[3]; for (int j = 0; j < 3; ++j) d[j] = g_vp.axis[0][j] - u * g_vp.axis[1][j] + v * g_vp.axis[2][j];   // axis: adelante, izquierda, arriba
+                    fprintf(stderr, "[H15] pixel %.0f,%.0f:\n", sx, sy); H15_PickRay(g_vp.origin, d); } }
         }
         ++k; p = strchr(p, ';'); if (p) ++p;
     }

@@ -135,7 +135,7 @@ bool g_marksOn, g_litFxOn;
 int g_markSurfs, g_markMax, g_markMeshes, g_litSurfs; double g_msMarks; int g_prevNow = -1;
 // OLA 7d: efectos de modelo (FX_ELEM_TYPE_MODEL: casquillos, trozos). FX_AddNonSpriteDrawSurfs (r_workercmds_common.cpp) -> FX_DrawElem_Model
 // -> R_FilterXModelIntoScene, que aqui guarda el modelo y su colocacion; se dibujan rigidos como los smodels de 7c (deformado en CPU de un
-// esqueleto con la colocacion y H4_DrawSkinnedSurf). Opt-in: H7D_FXMODELS=1 (caro, ver Init); H7D_BRASS=0 quita los casquillos (CG_EjectWeaponBrass).
+// esqueleto con la colocacion y H4_DrawSkinnedSurf). Por defecto encendidos desde OLA 15B; H7D_FXMODELS=0 los apaga; H7D_BRASS=0 quita los casquillos (CG_EjectWeaponBrass).
 struct FxModelInst { const XModel *model; GfxScaledPlacement pl; };
 std::vector<FxModelInst> g_fxModels; bool g_fxModelsOn, g_brassOn; int g_fxModelSurfs, g_fxModelMax, g_evBrass, g_fxLights, g_modelVerts; double g_msModels, g_msModelSkin, g_msModelMax;
 double NowMs() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
@@ -322,9 +322,11 @@ void Init()
         }
     }
     if (!g_marksOn && fx_marks) Dvar_SetBool((dvar_s *)fx_marks, false);
-    // modelos de FX: APAGADOS por defecto (H7D_FXMODELS=1 los enciende). En el Mac cuestan 30-70 ms/frame de media con picos de 300-700 ms
-    // (casi todo en H4_DrawSkinnedSurf, no en el deformado): no caben en el presupuesto del Fold hasta resolverlo (ver plan, OLA 7d)
-    g_fxModelsOn = getenv("H7D_FXMODELS") && atoi(getenv("H7D_FXMODELS"));
+    // modelos de FX (casquillos, astillas, sangre): ENCENDIDOS por defecto desde OLA 15B (H7D_FXMODELS=0 los apaga). En OLA 7d costaban
+    // 30-70 ms/frame; medido de nuevo en el Mac (long_test_mac.sh 3 min, SCRIPT=2): 0,04 ms/frame de media con 14 superficies/frame y
+    // peor frame 0,1 ms, H4_Frame 17,6 ms con ellos frente a 20,8 ms sin ellos (ruido). El coste de 7d no se reproduce con el backend vk
+    // actual (pipes=0 en regimen: no se crean pipelines por dibujo); no se pudo aislar que ola lo arreglo. Ver docs/evidencia/h15b.
+    g_fxModelsOn = !(getenv("H7D_FXMODELS") && !atoi(getenv("H7D_FXMODELS")));
     g_brassOn = !(getenv("H7D_BRASS") && !atoi(getenv("H7D_BRASS")));
     if (!cg_brass) cg_brass = _Dvar_RegisterBool("cg_brass", 1, 1u, "Weapons eject brass");   // CG_RegisterDvars
     // marcas sobre modelos (smodels/entidades): necesitan FX_GenerateMarkVertsForStaticModels/EntModels con la visibilidad de modelos del

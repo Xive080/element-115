@@ -69,8 +69,32 @@ static MapEnts *s_ents;
 static void EnumEnts(XAssetHeader h, void *) { if (!s_ents) s_ents = h.mapEnts; }
 // H7E_RAWLIST=texto (diagnostico): nombres de los rawfiles que contienen el texto (p.ej. clientscripts/)
 static void EnumRaw(XAssetHeader h, void *c) { if (h.rawfile && strstr(h.rawfile->name.get(), (const char *)c)) fprintf(stderr, "[H7E] rawfile %s (%d)\n", h.rawfile->name.get(), h.rawfile->len); }
+// OLA 15B (diagnostico, H15_PIXEL en world_h4.cpp): triangulos del mundo que corta el rayo org + t*dir, ordenados por distancia
+static GfxWorld *s_w15;
+void H15_PickRay(const float *o, const float *d)
+{
+    GfxWorld *w = s_w15; if (!w) return;
+    const GfxWorldVertex *V = w->draw.vd.vertices.get(); const unsigned short *I = w->draw.indices.get();
+    std::multimap<float, std::string> hits;
+    for (int si = 0; si < w->surfaceCount; ++si) { const GfxSurface *s = &w->dpvs.surfaces[si]; const srfTriangles_t &t = s->tris;
+        for (int k = 0; k < t.triCount; ++k) {
+            const float *p0 = V[t.firstVertex + I[t.baseIndex + 3 * k]].xyz, *p1 = V[t.firstVertex + I[t.baseIndex + 3 * k + 1]].xyz, *p2 = V[t.firstVertex + I[t.baseIndex + 3 * k + 2]].xyz;
+            float e1[3], e2[3], pv[3], tv[3], qv[3]; for (int j = 0; j < 3; ++j) { e1[j] = p1[j] - p0[j]; e2[j] = p2[j] - p0[j]; tv[j] = o[j] - p0[j]; }
+            pv[0] = d[1] * e2[2] - d[2] * e2[1]; pv[1] = d[2] * e2[0] - d[0] * e2[2]; pv[2] = d[0] * e2[1] - d[1] * e2[0];
+            const float det = e1[0] * pv[0] + e1[1] * pv[1] + e1[2] * pv[2]; if (fabsf(det) < 1e-9f) continue;
+            const float u = (tv[0] * pv[0] + tv[1] * pv[1] + tv[2] * pv[2]) / det; if (u < 0 || u > 1) continue;
+            qv[0] = tv[1] * e1[2] - tv[2] * e1[1]; qv[1] = tv[2] * e1[0] - tv[0] * e1[2]; qv[2] = tv[0] * e1[1] - tv[1] * e1[0];
+            const float v = (d[0] * qv[0] + d[1] * qv[1] + d[2] * qv[2]) / det; if (v < 0 || u + v > 1) continue;
+            const float tt = (e2[0] * qv[0] + e2[1] * qv[1] + e2[2] * qv[2]) / det; if (tt <= 0) continue;
+            const Material *m = s->material.get(); char buf[512];
+            snprintf(buf, sizeof buf, "surf %d tri %d mat '%s' sort %u prim %u en (%.1f,%.1f,%.1f) det %s", si, k, m ? m->info.name.get() : "-", m ? (unsigned)m->info.drawSurf.fields.primarySortKey : 0,
+                s->primaryLightIndex, o[0] + tt * d[0], o[1] + tt * d[1], o[2] + tt * d[2], det > 0 ? "+" : "-");
+            hits.insert({ tt, buf }); } }
+    int n = 0; for (auto &h : hits) { if (n++ >= 6) break; fprintf(stderr, "[H15]   t=%.1f %s\n", h.first, h.second.c_str()); }
+}
 void H7E_Setup(GfxWorld *w)
 {
+    s_w15 = w;
     if (const char *e = getenv("H7E_RAWLIST")) DB_EnumXAssets_FastFile(ASSET_TYPE_RAWFILE, EnumRaw, (void *)e, false);
     if (const char *e = getenv("H7E_ENTS")) {
         DB_EnumXAssets_FastFile(ASSET_TYPE_MAP_ENTS, EnumEnts, 0, false);
@@ -117,7 +141,31 @@ void H7E_Setup(GfxWorld *w)
                 const float zz = (p[0][2] + p[1][2] + p[2][2]) / 3; if (zz < z0 || zz > z1) continue;
                 const Material *m = s->material.get(); unsigned char c[3][4]; for (int q = 0; q < 3; ++q) memcpy(c[q], &V[t.firstVertex + I[t.baseIndex + 3 * k + q]].color, 4);
                 fprintf(stderr, "[H15] pick surf %d tri %d z~%.1f mat '%s' sort %u flags %u col.g %02X %02X %02X (%.0f,%.0f)(%.0f,%.0f)(%.0f,%.0f)\n", si, k, zz, m ? m->info.name.get() : "-",
-                    m ? (unsigned)m->info.drawSurf.fields.primarySortKey : 0, s->flags, c[0][1], c[1][1], c[2][1], p[0][0], p[0][1], p[1][0], p[1][1], p[2][0], p[2][1]); } }
+                    m ? (unsigned)m->info.drawSurf.fields.primarySortKey : 0, s->flags, c[0][1], c[1][1], c[2][1], p[0][0], p[0][1], p[1][0], p[1][1], p[2][0], p[2][1]);
+                for (int q = 0; q < 3; ++q) { const GfxWorldVertex &vv = V[t.firstVertex + I[t.baseIndex + 3 * k + q]];
+                    fprintf(stderr, "[H15]   v (%.1f,%.1f,%.1f) lmap %.5f %.5f tex %.3f %.3f\n", vv.xyz[0], vv.xyz[1], vv.xyz[2], vv.lmapCoord[0], vv.lmapCoord[1], vv.texCoord[0], vv.texCoord[1]); } } }
+    }
+    for (int which = 0; which < 2 && w; ++which) if (const char *e = getenv(which ? "H15_LMSECB" : "H15_LMSEC")) {   // OLA 15B (diagnostico): rellena el lightmap con un valor fijo
+        const unsigned val = (unsigned)strtoul(e, 0, 16);
+        for (int i = 0; i < w->draw.lightmapCount; ++i) { GfxImage *im = which ? w->draw.lightmaps[i].secondaryB.get() : w->draw.lightmaps[i].secondary.get();
+            D3DLOCKED_RECT lr; if (!im || !im->texture.map || im->texture.map->LockRect(0, &lr, nullptr, 0) != 0) continue;
+            for (unsigned y = 0; y < im->height; ++y) for (unsigned x = 0; x < im->width; ++x) {
+                if (which) ((unsigned *)((char *)lr.pBits + y * lr.Pitch))[x] = val; else ((unsigned short *)((char *)lr.pBits + y * lr.Pitch))[x] = (unsigned short)val; }
+            im->texture.map->UnlockRect(0); fprintf(stderr, "[H15] lightmap %s = 0x%X\n", which ? "secondaryB" : "secondary", val); }
+    }
+    if (const char *dir = getenv("H15_LMDUMP"); dir && w) {   // OLA 15B (diagnostico): lightmaps secondary (R5G6B5) y secondaryB (G16R16) a PPM
+        for (int i = 0; i < w->draw.lightmapCount; ++i) for (int which = 0; which < 2; ++which) {
+            GfxImage *im = which ? w->draw.lightmaps[i].secondaryB.get() : w->draw.lightmaps[i].secondary.get(); if (!im || !im->texture.map) continue;
+            D3DLOCKED_RECT lr; if (im->texture.map->LockRect(0, &lr, nullptr, 0) != 0) continue;
+            char fn[512]; snprintf(fn, sizeof fn, "%s/lm%d_%s.ppm", dir, i, which ? "secB" : "sec");
+            if (FILE *f = fopen(fn, "wb")) { fprintf(f, "P6 %u %u 255\n", im->width, im->height);
+                for (unsigned y = 0; y < im->height; ++y) for (unsigned x = 0; x < im->width; ++x) { unsigned char px[3];
+                    if (which) { const unsigned v = ((const unsigned *)((const char *)lr.pBits + y * lr.Pitch))[x]; px[0] = (v & 0xFFFF) >> 8; px[1] = v >> 24; px[2] = 0; }
+                    else { const unsigned short v = ((const unsigned short *)((const char *)lr.pBits + y * lr.Pitch))[x]; px[0] = ((v >> 11) & 31) * 255 / 31; px[1] = ((v >> 5) & 63) * 255 / 63; px[2] = (v & 31) * 255 / 31; }
+                    fwrite(px, 1, 3, f); }
+                fclose(f); }
+            im->texture.map->UnlockRect(0);
+        }
     }
     if (const char *e = getenv("H15_SETG"); e && w && w->draw.vd.worldVb.get()) {   // OLA 15B (diagnostico): fija el peso de capa (color.g) de las superficies con capa
         const int g = atoi(e); void *p = nullptr; int n = 0;
@@ -127,6 +175,27 @@ void H7E_Setup(GfxWorld *w)
                 for (unsigned v = 0; v < s->tris.vertexCount; ++v) { ((unsigned char *)p)[44 * (s->tris.firstVertex + v) + 17] = (unsigned char)g; ++n; } }
             w->draw.vd.worldVb->Unlock(); }
         fprintf(stderr, "[H15] SETG %d en %d vertices\n", g, n);
+    }
+    if (const char *e = getenv("H15_FILL"); e && w) {   // OLA 15B (diagnostico): "subcadena=AARRGGBB;..." rellena todas las mips de las imagenes cuyo nombre contiene la subcadena
+        std::string all = e; size_t p0 = 0;
+        while (p0 < all.size()) { size_t p1 = all.find(';', p0); if (p1 == std::string::npos) p1 = all.size(); std::string it = all.substr(p0, p1 - p0); p0 = p1 + 1;
+            const size_t eq = it.find('='); if (eq == std::string::npos) continue; const std::string key = it.substr(0, eq); const unsigned val = (unsigned)strtoul(it.c_str() + eq + 1, 0, 16);
+            const unsigned a = val >> 24, r = (val >> 16) & 255, g = (val >> 8) & 255, b = val & 255; const unsigned short c565 = (unsigned short)((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3));
+            std::set<GfxImage *> seen;
+            for (int si = 0; si < w->surfaceCount; ++si) { Material *m = w->dpvs.surfaces[si].material.get(); if (!m) continue;
+                for (int k = 0; k < m->textureCount; ++k) { const MaterialTextureDef &td = m->textureTable.get()[k]; GfxImage *im = td.semantic == 11 ? nullptr : td.u.image.get();
+                    if (!im || !im->texture.map || !strstr(im->name.get(), key.c_str()) || !seen.insert(im).second) continue;
+                    const D3DFORMAT f = R_ImagePixelFormat(im); const unsigned lv = im->texture.map->GetLevelCount();
+                    for (unsigned l = 0; l < lv; ++l) { D3DLOCKED_RECT lr; if (im->texture.map->LockRect(l, &lr, nullptr, 0) != 0) continue;
+                        const unsigned W = std::max(1u, (unsigned)im->width >> l), H = std::max(1u, (unsigned)im->height >> l);
+                        if (f == D3DFMT_DXT1 || f == D3DFMT_DXT3 || f == D3DFMT_DXT5) { const unsigned bs = f == D3DFMT_DXT1 ? 8 : 16;
+                            unsigned char blk[16] = {}; unsigned char *cb = blk + (bs - 8);
+                            if (f == D3DFMT_DXT5) { blk[0] = blk[1] = (unsigned char)a; } else if (f == D3DFMT_DXT3) memset(blk, (a >> 4) * 0x11, 8);
+                            cb[0] = cb[2] = c565 & 255; cb[1] = cb[3] = c565 >> 8; if (f == D3DFMT_DXT1) { cb[0] = (c565 + 0) & 255; }   // c0 == c1: modo 3 colores, indice 0 = c0
+                            for (unsigned by = 0; by < (H + 3) / 4; ++by) for (unsigned bx = 0; bx < (W + 3) / 4; ++bx) memcpy((char *)lr.pBits + by * lr.Pitch + bx * bs, blk, bs); }
+                        else for (unsigned y = 0; y < H; ++y) for (unsigned x = 0; x < W; ++x) ((unsigned *)((char *)lr.pBits + y * lr.Pitch))[x] = val;
+                        im->texture.map->UnlockRect(l); }
+                    fprintf(stderr, "[H15] fill '%s' fmt %d %u mips = %08X\n", im->name.get(), (int)f, lv, val); } } }
     }
     if (const char *e = getenv("H15_DYN")) {   // OLA 15B (diagnostico): entidades dinamicas del mapa (DynEntityDef) a menos de r de (x,y,z)
         float c[3] = { 0, 0, 0 }, r = 1e9f; sscanf(e, "%f,%f,%f,%f", &c[0], &c[1], &c[2], &r);

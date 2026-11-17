@@ -19,6 +19,7 @@ if [ "$TARGET" = ndk ]; then
   # char con signo como en x86 y en el Mac (la referencia probada): el codigo decompilado hace (char)x esperando signo
   # (p.ej. ps->movementDir = (char)moveyaw -> 248 en vez de -8 y assert en BG_PlayerToEntitySetTrajectory). OLA 5.
   EXTRA_FL="$EXTRA_FL -fsigned-char"
+  NPFX="-ffile-prefix-map=$(cd $H/.. && pwd)/="; EXTRA_FL="$EXTRA_FL $NPFX"   # OLA 15F: sin rutas /Users/ (__FILE__) en libmain.so; tambien miniaudio (abajo) y libv9 (build_vk.sh)
   if [ "$BACKEND" = vk ]; then
     VK_BE=1; O=$O"_vk$SUF"; VWSI=none; [ -n "$APP" ] && VWSI=android
     # -landroid -llog: libv9.a (vk_wsi_android.cpp) usa ANativeWindow_*/__android_log_*; tambien para el ejecutable de consola
@@ -68,6 +69,7 @@ srcs="$srcs $H/harness2/ui_p5.cpp"
 srcs="$srcs $H/harness2/h7_gfx.cpp $Z/src/gfx_d3d/rb_postfx.cpp"   # OLA 7g: fidelidad grafica (mips altos, vision set, RB_BloomLDR original)
 for f in $H/harness2/h7c_gfx.cpp $Z/src/gfx_d3d/rb_fog.cpp; do case " $H8_XSRC $EXTRA " in *"$(basename $f)"*) ;; *) srcs="$srcs $f";; esac; done   # OLA 7c: brushmodels/smodels/fov/brazos/HUD + niebla (R_SetFrameFog original); sin duplicar si ya van en H8_XSRC/EXTRA
 case " $H8_XSRC $EXTRA " in *h7e_light.cpp*) ;; *) srcs="$srcs $H/harness2/h7e_light.cpp";; esac   # OLA 7e: luz de la sala + estado de cliente (luces de script, vision por planta, script_model de cliente)
+for f in h9_shadow.cpp h9_reflect.cpp h9_video.cpp; do [ -f $H/harness2/$f ] || continue; case " $H8_XSRC $EXTRA " in *"$f"*) ;; *) srcs="$srcs $H/harness2/$f";; esac; done   # OLA 9: sombras de focos, sondas de reflejo, pantallas de la caja
 # H5a0: VM GSC original (clientscript) + pegamento/prueba aislada (h5_vm.cpp, H5_VM=1). Lista de nombres de builtins generada de las tablas reales.
 for b in cscr_animtree cscr_compiler cscr_debugger cscr_evaluate cscr_instance cscr_main cscr_memorytree cscr_parser cscr_parsetree cscr_readwrite cscr_save cscr_stringlist cscr_tempmemory cscr_variable cscr_vm cscr_yacc scr_const; do srcs="$srcs $Z/src/clientscript/$b.cpp"; done
 srcs="$srcs $H/harness2/h5_vm.cpp"
@@ -154,7 +156,7 @@ fi
 mkdir -p $O/gen; python3 -I $H/harness2/h5_genbuiltins.py $Z/src $O/gen/h5_builtins.inc.new >/dev/null && { cmp -s $O/gen/h5_builtins.inc.new $O/gen/h5_builtins.inc || mv $O/gen/h5_builtins.inc.new $O/gen/h5_builtins.inc; rm -f $O/gen/h5_builtins.inc.new; }
 if [ -n "$H5G" ] && [ -n "$H6SND" ]; then   # OLA 6a: salida de audio (miniaudio 0.11.21, third_party) compilada aparte, en C y sin el prelude de compat
   mkdir -p $O/maobj; MAO=$O/maobj/h5_audio_ma.o
-  if [ ! -f $MAO ] || [ $H/harness2/h5_audio_ma.c -nt $MAO ]; then ${CXX/clang++/clang} -x c -std=c11 -O2 -w ${APP:+-fPIC} -I $H/../third_party/miniaudio -c $H/harness2/h5_audio_ma.c -o $MAO || { echo "FAIL h5_audio_ma"; exit 1; }; fi
+  if [ ! -f $MAO ] || [ $H/harness2/h5_audio_ma.c -nt $MAO ]; then ${CXX/clang++/clang} -x c -std=c11 -O2 -w ${APP:+-fPIC} $NPFX -I $H/../third_party/miniaudio -c $H/harness2/h5_audio_ma.c -o $MAO || { echo "FAIL h5_audio_ma"; exit 1; }; fi
   LIBS="$MAO $LIBS"; if [ "$TARGET" = ndk ]; then LIBS="$LIBS -ldl -lm"; else LIBS="$LIBS -framework CoreAudio -framework AudioToolbox -framework CoreFoundation"; fi
 fi
 [ -n "$GLES_BE" ] && srcs="$srcs $H/gles/d3d9_gles.cpp"
