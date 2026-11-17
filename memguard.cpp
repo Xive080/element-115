@@ -1,12 +1,26 @@
-// Guardian de memoria: hilo que lee VmRSS y MemAvailable; registra cada 2 s y hace abort() ordenado si el proceso o el sistema se pasan
-// (un exceso de RAM/GPU en el Pixel Fold llego a tumbar el SO con kernel_panic por OOM). Env: MG_RSS_MAX_MB (2500), MG_AVAIL_MIN_MB (1500).
+// Guardian de memoria: hilo que lee VmRSS y MemAvailable cada 250 ms, registra cada 2 s y protege al sistema (un exceso de RAM/GPU en el
+// Pixel Fold llego a tumbar el SO con kernel_panic por OOM; INCIDENTE 2026-11-16). SIEMPRE activo: no hay forma de apagarlo.
+// OLA 18: guarda por TRAMOS (antes: RSS>1500 MB o avail<2500 MB -> abort):
+//   - RSS (VmRSS de /proc/self/status: lo residente REAL del proceso; incluye la memoria del driver Mali mapeada, sin el doble conteo de
+//     dumpsys) > MG_RSS_MAX_MB (3072) -> abort() inmediato. Es el techo duro.
+//   - RSS > MG_RSS_SOFT_MB (2048, el objetivo normal) -> PRESION: la app reduce calidad en vez de morir (g_mgPressure, ver abajo).
+//   - MemAvailable del sistema < MG_AVAIL_LOW_MB (1500) -> PRESION. Solo aborta si sigue cayendo: avail < MG_AVAIL_MIN_MB (1000)
+//     durante MG_AVAIL_MIN_TICKS muestras seguidas (8 = 2 s), o < la mitad de MG_AVAIL_MIN_MB en una sola muestra.
+//   - La presion se quita con histeresis: avail > LOW + 300 y RSS < SOFT - 128 durante 5 s seguidos.
+// Las variables se vuelven a leer cada 2 s (en Android llegan DESPUES de este constructor, desde android_main / debug.bo1.env) y SOLO pueden
+// APRETAR los valores compilados: un MG_RSS_MAX_MB mayor que 3072 o un MG_AVAIL_MIN_MB menor que 1000 se ignoran.
+// Presion (g_mgPressure: 0 nada, 1 presion): vk_frame recorta tex.pkg cada frame y vk_texture crea las texturas NUEVAS con la mitad de lado
+// (un mip menos); aqui, al entrar, mallopt(M_PURGE) devuelve al sistema lo libre del heap. MG_TEST_PRESSURE_S=s (pruebas) simula presion
+// desde el segundo s (no afloja nada).
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #ifdef __ANDROID__
 #include <android/log.h>
+#include <malloc.h>
 #endif
 static long ReadKb(const char *file, const char *key)
 {
@@ -14,27 +28,66 @@ static long ReadKb(const char *file, const char *key)
     while (fgets(l, sizeof l, f)) if (!strncmp(l, key, n)) { v = atol(l + n); break; }
     fclose(f); return v;
 }
+extern "C" { volatile int g_mgPressure = 0; }   // lo leen vk_frame / vk_texture (referencia debil: sin memguard vale 0)
+static const long kRssMaxMb = 3072, kRssSoftMb = 2048, kAvailLowMb = 1500, kAvailMinMb = 1000;
+struct MgCfg { long rssMax, rssSoft, availLow, availMin; int minTicks; long testS; };
+static long EnvMb(const char *n, long def, bool tighterIsLower)
+{
+    const char *e = getenv(n); if (!e || !*e) return def; long v = atol(e); if (v <= 0) return def;
+    return tighterIsLower ? (v < def ? v : def) : (v > def ? v : def);   // solo aprieta
+}
+static MgCfg MgRead()
+{
+    MgCfg c; c.rssMax = EnvMb("MG_RSS_MAX_MB", kRssMaxMb, true); c.rssSoft = EnvMb("MG_RSS_SOFT_MB", kRssSoftMb, true); if (c.rssSoft > c.rssMax) c.rssSoft = c.rssMax;
+    c.availMin = EnvMb("MG_AVAIL_MIN_MB", kAvailMinMb, false); c.availLow = EnvMb("MG_AVAIL_LOW_MB", kAvailLowMb, false); if (c.availLow < c.availMin) c.availLow = c.availMin;
+    const char *t = getenv("MG_AVAIL_MIN_TICKS"); c.minTicks = t && atoi(t) > 0 && atoi(t) < 8 ? atoi(t) : 8;   // solo aprieta (menos muestras)
+    const char *p = getenv("MG_TEST_PRESSURE_S"); c.testS = p && atol(p) > 0 ? atol(p) : 0;
+    return c;
+}
+static void MgLog(int prio, const char *m)
+{
+    fprintf(stderr, "%s\n", m);
+#ifdef __ANDROID__
+    __android_log_print(prio == 2 ? ANDROID_LOG_FATAL : prio == 1 ? ANDROID_LOG_WARN : ANDROID_LOG_INFO, "bo1native", "%s", m);
+#endif
+}
 static void *Guard(void *)
 {
-    long rssMax = (getenv("MG_RSS_MAX_MB") ? atol(getenv("MG_RSS_MAX_MB")) : 1500) * 1024L;
-    long availMin = (getenv("MG_AVAIL_MIN_MB") ? atol(getenv("MG_AVAIL_MIN_MB")) : 2500) * 1024L;
-    int tick = 0;
+    MgCfg c = MgRead(); int tick = 0, lowTicks = 0, okTicks = 0; long minAvail = -1, peakRss = 0;
+    timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); const long t0 = ts.tv_sec;
     for (;;) {
+        if (tick % 8 == 0) c = MgRead();
         long rss = ReadKb("/proc/self/status", "VmRSS:"), avail = ReadKb("/proc/meminfo", "MemAvailable:");
+        if (rss > peakRss) peakRss = rss; if (avail >= 0 && (minAvail < 0 || avail < minAvail)) minAvail = avail;
+        char m[260];
         if (tick % 8 == 0) {
-            char m[200]; snprintf(m, sizeof m, "[memguard] RSS=%ld MB MemAvailable=%ld MB (limites RSS<%ld MB, avail>%ld MB)", rss / 1024, avail / 1024, rssMax / 1024, availMin / 1024);
-            fprintf(stderr, "%s\n", m);
-#ifdef __ANDROID__
-            __android_log_print(ANDROID_LOG_INFO, "bo1native", "%s", m);
-#endif
+            snprintf(m, sizeof m, "[memguard] RSS=%ld MB (pico %ld) MemAvailable=%ld MB (min %ld) presion=%d (techo RSS %ld, objetivo %ld, avail baja<%ld, aborto<%ld)",
+                     rss / 1024, peakRss / 1024, avail / 1024, minAvail / 1024, g_mgPressure, c.rssMax, c.rssSoft, c.availLow, c.availMin);
+            MgLog(0, m);
         }
-        if (rss > rssMax || (avail >= 0 && avail < availMin)) {
-            char m[200]; snprintf(m, sizeof m, "[memguard] LIMITE SUPERADO: RSS=%ld MB avail=%ld MB -> abort()", rss / 1024, avail / 1024);
-            fprintf(stderr, "%s\n", m);
-#ifdef __ANDROID__
-            __android_log_print(ANDROID_LOG_FATAL, "bo1native", "%s", m);
+        // 1) techo duro de RSS y caida sostenida de MemAvailable -> abort ordenado
+        const bool availVeryLow = avail >= 0 && avail < c.availMin * 1024L / 2;
+        lowTicks = avail >= 0 && avail < c.availMin * 1024L ? lowTicks + 1 : 0;
+        if (rss > c.rssMax * 1024L || availVeryLow || lowTicks >= c.minTicks) {
+            snprintf(m, sizeof m, "[memguard] LIMITE SUPERADO: RSS=%ld MB (techo %ld) avail=%ld MB (min %ld, %d muestras seguidas) -> abort()", rss / 1024, c.rssMax, avail / 1024, c.availMin, lowTicks);
+            MgLog(2, m); fflush(stderr); abort();
+        }
+        // 2) presion: reducir calidad en vez de morir
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        const bool test = c.testS && ts.tv_sec - t0 >= c.testS;
+        const bool hot = test || rss > c.rssSoft * 1024L || (avail >= 0 && avail < c.availLow * 1024L);
+        const bool cool = !test && rss < (c.rssSoft - 128) * 1024L && (avail < 0 || avail > (c.availLow + 300) * 1024L);
+        if (hot && !g_mgPressure) {
+            g_mgPressure = 1; okTicks = 0;
+            snprintf(m, sizeof m, "[memguard] PRESION ON: RSS=%ld MB avail=%ld MB%s -> recorte de tex.pkg por frame, texturas nuevas a mitad de lado, purga del heap",
+                     rss / 1024, avail / 1024, test ? " (MG_TEST_PRESSURE_S)" : "");
+            MgLog(1, m);
+#if defined(__ANDROID__) && defined(M_PURGE)
+            mallopt(M_PURGE, 0);
 #endif
-            fflush(stderr); abort();
+        } else if (g_mgPressure) {
+            okTicks = cool ? okTicks + 1 : 0;
+            if (okTicks >= 20) { g_mgPressure = 0; snprintf(m, sizeof m, "[memguard] PRESION OFF: RSS=%ld MB avail=%ld MB", rss / 1024, avail / 1024); MgLog(1, m); }
         }
         ++tick; usleep(250000);
     }
@@ -83,13 +136,14 @@ static void H15Log(const char *why)
     static long t0 = H15Ms(); static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; pthread_mutex_lock(&mu);
     const H15Mem m = H15Read(); const char *ph = s_h15Phase.load();
     if (m.rss > s_h15Peak) { s_h15Peak = m.rss; s_h15PeakPhase = ph; }
-    char l[320]; snprintf(l, sizeof l, "[H15MEM] %s fase=%s t=%ld rss=%ld anon=%ld file=%ld shmem=%ld vss=%ld hwm=%ld heap=%ld pico=%ld(%s) KB", why, ph, H15Ms() - t0,
-                          m.rss, m.anon, m.file, m.shm, m.vss, m.hwm, m.heap, s_h15Peak, s_h15PeakPhase);
+    const long avail = ReadKb("/proc/meminfo", "MemAvailable:");   // OLA 18: memoria libre del sistema y presion de memguard en cada muestra
+    char l[360]; snprintf(l, sizeof l, "[H15MEM] %s fase=%s t=%ld rss=%ld anon=%ld file=%ld shmem=%ld vss=%ld hwm=%ld heap=%ld avail=%ld presion=%d pico=%ld(%s) KB", why, ph, H15Ms() - t0,
+                          m.rss, m.anon, m.file, m.shm, m.vss, m.hwm, m.heap, avail, g_mgPressure, s_h15Peak, s_h15PeakPhase);
     fprintf(stderr, "%s\n", l);
 #ifdef __ANDROID__
     __android_log_print(ANDROID_LOG_INFO, "bo1native", "%s", l);
 #endif
-    if (s_h15Csv) { fprintf(s_h15Csv, "%ld,%s,%s,%ld,%ld,%ld,%ld,%ld,%ld,%ld\n", H15Ms() - t0, why, ph, m.rss, m.anon, m.file, m.shm, m.vss, m.hwm, m.heap); fflush(s_h15Csv); }
+    if (s_h15Csv) { fprintf(s_h15Csv, "%ld,%s,%s,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%d\n", H15Ms() - t0, why, ph, m.rss, m.anon, m.file, m.shm, m.vss, m.hwm, m.heap, avail, g_mgPressure); fflush(s_h15Csv); }
     pthread_mutex_unlock(&mu);
 }
 extern "C" void H15_MemPhase(const char *phase)   // fases: el texto debe vivir siempre (literal o static)
@@ -106,7 +160,7 @@ static void *H15Thread(void *)
 static void H15BeginOnce()
 {
     const char *e = getenv("H15_MEMPROFILE");
-    if (strcmp(e, "1")) { s_h15Csv = fopen(e, "w"); if (s_h15Csv) fprintf(s_h15Csv, "t_ms,motivo,fase,rss_kb,anon_kb,file_kb,shmem_kb,vss_kb,hwm_kb,heap_kb\n"); }
+    if (strcmp(e, "1")) { s_h15Csv = fopen(e, "w"); if (s_h15Csv) fprintf(s_h15Csv, "t_ms,motivo,fase,rss_kb,anon_kb,file_kb,shmem_kb,vss_kb,hwm_kb,heap_kb,avail_kb,presion\n"); }
     atexit([] { H15Log("SALIDA"); });
     pthread_t t; pthread_create(&t, nullptr, H15Thread, nullptr); pthread_detach(t);
 }

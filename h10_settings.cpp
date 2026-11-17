@@ -555,11 +555,13 @@ void H10_Touch(int phase, float fx, float fy)
 // Bajo/Medio/Alto agrupan lo que el port soporta de verdad; tocar un valor suelto pasa el perfil a Personalizado (3).
 struct Prof { int scale, picmip, maxTex, aniso; const char *mip; int postfx, fps; float fov; int shadows; };   // fps: com_maxfps (0 = sin limite; con vsync manda la pantalla); fov: cg_fov_default (65-80 del original)
 #ifdef __ANDROID__
-// Fold (presupuesto RSS 1500 MB, >=55 fps): Alto = la configuracion medida hoy (picmip 0, V9_MAXTEX 512, resolucion nativa, postfx)
+// Fold (presupuesto RSS 1500 MB hasta la OLA 18; ahora techo 3 GB y objetivo 2 GB, memguard.cpp; >=55 fps): Alto = la configuracion medida hoy (picmip 0, V9_MAXTEX 512, resolucion nativa, postfx)
 // fps: Bajo 30 (bateria/temperatura), Medio y Alto 60 (el presupuesto pide >=55; 90/120 quedan a mano para la pantalla de 120 Hz)
 // shadows (OLA 9): focos con mapa de sombra (sm_enable + sm_maxLights del original). En el Fold Alto va con 2 hasta medirlo en el
 // dispositivo (en el M1 4 focos cuestan ~0,7 ms/frame); 4 = el original, a mano (fila SOMBRAS / sm_maxLights en config.cfg).
-static const Prof kProf[3] = { { 67, 2, 256, 1, "Force Bilinear", 0, 30, 65, 0 }, { 85, 1, 512, 4, "Force Trilinear", 1, 60, 65, 0 }, { 100, 0, 512, 4, "Force Trilinear", 1, 60, 65, 2 } };
+// OLA 18 (techo de memoria 3 GB, medido en el Fold): Alto sube el tope de texturas de 512 a 2048 = todos los mips originales (Five: 31
+// niveles de 1024 y 1 de 2048 en tex.pkg, +27 MB ASTC; pico de VmRSS medido en docs/evidencia/fold18). Medio y Bajo no cambian.
+static const Prof kProf[3] = { { 67, 2, 256, 1, "Force Bilinear", 0, 30, 65, 0 }, { 85, 1, 512, 4, "Force Trilinear", 1, 60, 65, 0 }, { 100, 0, 2048, 4, "Force Trilinear", 1, 60, 65, 2 } };
 #else
 // fps: Bajo y Medio 60, Alto sin limite (lo marca el vsync de la pantalla)
 // shadows (OLA 9): Bajo sin sombras, Medio 2 focos, Alto 4 (= sm_maxLights del original)
