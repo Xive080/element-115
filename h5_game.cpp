@@ -285,7 +285,7 @@ static int g_h5gFrame;
 extern "C" void H15_MemPhase(const char *phase);   // OLA 15A: memguard.cpp (H15_MEMPROFILE)
 int H5G_Run()
 {
-    const char *map = getenv("H5_MAP") ? getenv("H5_MAP") : "zombie_pentagon";
+    extern const char *H18_Map(); const char *map = getenv("H5_MAP") ? getenv("H5_MAP") : H18_Map();   // OLA M0: lo resuelve h18_maps.cpp
     const int frames = getenv("H5_FRAMES") ? atoi(getenv("H5_FRAMES")) : 600;
     fprintf(stderr, "[H5G] arranque del servidor dedicado: %s, %d frames\n", map, frames);
     { extern int g_h0PrintAll; g_h0PrintAll = getenv("H5_GAME_VERBOSE") != 0; }

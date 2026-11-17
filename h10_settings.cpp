@@ -852,7 +852,7 @@ static void TouchLayoutInit()
         menuDef_t *m = s_dc->Menus[k]; const char *n = m->window.name ? m->window.name.get() : "";
         if (!strcmp(n, "options_new_pc") || !strcmp(n, "options_graphics_defaults")) TouchCollect(m, -300, -110, 185, false);
         else if (!strncmp(n, "options_", 8) && strcmp(n, "options_controls_new_pc")) { TouchCollect(m, -300, -110, 185, false); TouchCollect(m, -110, 1e9f, 185, false); }
-        else if (!strcmp(n, "pausedmenu")) TouchCollect(m, 40, 400, 470, false);
+        else if (!strcmp(n, "pausedmenu") || !strcmp(n, "h18_maps")) TouchCollect(m, 40, 400, 470, false);   // h18_maps: selector de mapas (OLA M0), mismas filas
         else if (IsPopup(m)) {   // botones del popup: crecen hacia abajo dentro del marco (borde inferior del menu)
             const rectDef_s &mr = m->window.rect; TouchCollect(m, -1e9f, 1e9f, mr.h > 0 ? mr.y + mr.h - 6 : 1e9f, true); }
     }
@@ -1014,6 +1014,7 @@ static bool TouchLayout() { const char *e = getenv("H10_TOUCH");
     return e && atoi(e);
 #endif
 }
+extern void (*g_h18PatchMenus)(UiContext *);   // h18_maps.cpp (OLA M0); dato: a cero si la TU no esta
 void H10_Draw(int W, int H)
 {
     if (!s_on) return;
@@ -1024,7 +1025,9 @@ void H10_Draw(int W, int H)
         if (const char *d = getenv("H10_RAW")) { std::string l = d; for (size_t p = 0; p < l.size();) { size_t q = l.find(',', p); if (q == std::string::npos) q = l.size(); H10_DumpRaw(l.substr(p, q - p).c_str()); p = q + 1; } }
         if (const char *d = getenv("H10_ITEMS")) { char mn[64]; int a = 0, b = 0; if (sscanf(d, "%63[^:]:%d:%d", mn, &a, &b) == 3) H10_DumpItems(mn, a, b); }
         SettingsInit();
-        if (!getenv("H10_ORIG")) { PatchGraphicsMenu(TouchLayout()); if (s_neverOk) { PatchRootMenu(); PatchGameMenu(); if (!getenv("H10_KEEPCONTROLS")) PatchControlsTab(); if (TouchLayout()) TouchLayoutInit(); } }
+        if (!getenv("H10_ORIG")) { PatchGraphicsMenu(TouchLayout()); if (s_neverOk) { PatchRootMenu(); PatchGameMenu(); if (!getenv("H10_KEEPCONTROLS")) PatchControlsTab();
+            if (g_h18PatchMenus) g_h18PatchMenus(s_dc);   // OLA M0: fila MAPS en la pausa y menu h18_maps (h18_maps.cpp), antes de la disposicion tactil
+            if (TouchLayout()) TouchLayoutInit(); } }
         if (const char *d = getenv("H10_ITEMS2")) { char mn[64]; int a = 0, b = 0; if (sscanf(d, "%63[^:]:%d:%d", mn, &a, &b) == 3) H10_DumpItems(mn, a, b); }   // despues de cambiar las filas
         if (const char *o = getenv("H10_OPEN")) H10_Open(o);
         if (const char *p = getenv("H10_PILOT")) PilotParse(p);

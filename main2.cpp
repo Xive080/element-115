@@ -59,6 +59,7 @@ __attribute__((weak))
 const dvar_s *sv_cheats;
  const dvar_s *dedicated; const dvar_s *cl_paused; const dvar_s *cg_draw2D;
 
+const char *H18_DefaultMap(); void H18_ResolveBoot(int argc, char **argv); void H18_PlayLoadVideo();   // OLA M0: h18_maps.cpp (mapa de arranque y su carpeta de datos)
 static int g_loaded = 0;
 extern "C" void H15_MemPhase(const char *phase);   // OLA 15A: memguard.cpp (H15_MEMPROFILE)
 static void LoadFF(const char *path)
@@ -72,7 +73,7 @@ static void LoadFF(const char *path)
         // H5: banderas REALES de zona (DB_LoadXAssets/Com_LoadLevelFastFiles): comun 256 (prioridad 52) y su _patch 1024 (60),
         // nivel 0x4000 (55) y su _patch 0x40000 (57): los _patch pisan a la zona base. Con el reparto ciclico de kZonePrio
         // common_zombie (57) ganaba a common_zombie_patch (3) y salia el _zombiemode.gsc viejo (llama a _zombiemode_ffotd::init).
-        const char *hm = getenv("H5_MAP") ? getenv("H5_MAP") : "zombie_pentagon";
+        const char *hm = getenv("H5_MAP") ? getenv("H5_MAP") : H18_DefaultMap();   // H18_ResolveBoot ya lo fijo
         if (zn == "common_zombie") g_zoneNames[a].flags = 256;
         else if (zn == "common_zombie_patch") g_zoneNames[a].flags = 1024;
         else if (zn == hm) g_zoneNames[a].flags = 0x4000;
@@ -134,10 +135,13 @@ int main(int argc, char **argv)
 #endif
 {
 #ifndef BO1_APP
+    H18_ResolveBoot(argc, argv);   // OLA M0: mapa y P3_GAMEDATA antes de leer datos o config
     int W0 = getenv("P4_W") ? atoi(getenv("P4_W")) : 1280, H0 = getenv("P4_H") ? atoi(getenv("P4_H")) : 720;
 #else
+    H18_ResolveBoot(0, nullptr);
     int W0 = AW, H0 = AH;
 #endif
+    H18_PlayLoadVideo();   // OLA M0: video de carga del mapa si existe (stub: sin reproductor todavia; nunca es un error)
 #ifdef H5G
     { void H10_PreBackend(int *, int *); H10_PreBackend(&W0, &H0); }   // OLA 10: resolucion interna y tope de texturas del config (h10_settings.cpp)
 #endif
@@ -254,7 +258,7 @@ int main(int argc, char **argv)
     LoadFF((G + "english/en_common_zombie.ff").c_str());
 
     if (getenv("H5_VM") || getenv("H5_GAME")) {   // H5a0: VM GSC original aislada (h5_vm.cpp); H5_MAP = zona del mapa con los _zombiemode*.gsc
-        const char *hm = getenv("H5_MAP"); if (!hm) hm = "zombie_pentagon";
+        const char *hm = getenv("H5_MAP"); if (!hm) hm = H18_DefaultMap();   // OLA M0: lo fija H18_ResolveBoot (menu de mapas / H5_MAP / defecto)
         // orden del juego: common_zombie(_patch) y luego el mapa y su parche (los _ffotd y las correcciones viven en los _patch)
         // H5_ZONES=a,b,c sustituye la lista (zonas de Common/ en orden de carga)
         std::string zl = getenv("H5_ZONES") ? getenv("H5_ZONES") : std::string("common_zombie_patch,") + hm + "," + hm + "_patch";

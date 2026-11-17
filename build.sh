@@ -58,6 +58,7 @@ for b in $UNI; do srcs="$srcs $Z/src/universal/$b.cpp"; done
 for b in cm_trace cm_test cm_mesh cm_tracebox cm_staticmodel; do srcs="$srcs $Z/src/qcommon/$b.cpp"; done   # colisiones reales (CM_BoxTrace/capsula)
 srcs="$srcs $Z/src/database/db_*.cpp $H/harness2/trace_defaults.cpp $H/harness2/rt2.cpp $H/harness2/trace.cpp $H/harness2/main2.cpp $H/harness2/iwd.cpp $H/harness2/world_h4.cpp $H/harness2/memguard.cpp"
 srcs="$srcs $Z/src/stringed/stringed_hooks.cpp $Z/src/ik/ik_math.cpp"
+srcs="$srcs $H/harness2/h18_maps.cpp"   # OLA M0: mapa de arranque + carpeta de datos por mapa (y, con H5G, selector en el menu de pausa)
 # H4: movimiento ORIGINAL del jugador (PmoveSingle/PM_WalkMove/PM_StepSlideMove/salto); el pegamento minimo esta en pmove_h4.cpp
 for b in bg_pmove bg_slidemove bg_jump bg_misc bg_mantle bg_dtp bg_perks; do srcs="$srcs $Z/src/bgame/$b.cpp"; done
 srcs="$srcs $Z/src/physics/phys_traverse.cpp $H/harness2/pmove_h4.cpp"   # phys_traverse: colgeom_visitor_t (proximidad de PM_trace)
