@@ -278,6 +278,7 @@ float g_h4ModelLightCoords[4] = { 0.5f, 0.5f, 0.5f, 1.0f };
 unsigned char g_h4ModelLitTech = 10;
 void (*g_h4PreFrame)();   // antes de abrir el pase del frame (subidas de texturas sin partir el render pass)
 int g_h4SkinnedDrawn, g_h4SkinnedSkipped, g_h4SkinnedTech[256];
+void (*g_h4ModelProbe)(GfxCmdBufContext, const XSurface *, const GfxPackedVertex *);   // OLA 9: sonda de reflejo del objeto (h9_reflect.cpp)
 void H4_DrawSkinnedSurf(Material *m, XSurface *xsurf, GfxPackedVertex *verts, unsigned char techType)
 {
     GfxCmdBufContext ctx = gfxCmdBufContext;
@@ -312,6 +313,7 @@ void H4_DrawSkinnedSurf(Material *m, XSurface *xsurf, GfxPackedVertex *verts, un
         R_ChangeDepthHackNearClip(ctx.source, 0);
         R_SetVertexDeclTypeModelSkinned(xsurf, ctx.state);
         R_TrackPrims(&ctx.state->prim, GFX_PRIM_STATS_XMODELSKINNED);
+        if (g_h4ModelProbe) g_h4ModelProbe(ctx, xsurf, verts);   // OLA 9: R_SetReflectionProbe del objeto (h9_reflect.cpp)
         if (g_h4ModelLight) {   // R_SetModelLightingCoordsForSource: centro del volumen neutro (por objeto)
             float *c = ctx.source->input.consts[CONST_SRC_CODE_BASE_LIGHTING_COORDS]; memcpy(c, g_h4ModelLightCoords, 16); ++ctx.source->constVersions[CONST_SRC_CODE_BASE_LIGHTING_COORDS]; }
         R_SetupPassPerObjectArgs(ctx);

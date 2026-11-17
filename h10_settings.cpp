@@ -553,14 +553,17 @@ void H10_Touch(int phase, float fx, float fy)
 
 // ---------------------------------------------------------------- perfiles de calidad
 // Bajo/Medio/Alto agrupan lo que el port soporta de verdad; tocar un valor suelto pasa el perfil a Personalizado (3).
-struct Prof { int scale, picmip, maxTex, aniso; const char *mip; int postfx, fps; float fov; };   // fps: com_maxfps (0 = sin limite; con vsync manda la pantalla); fov: cg_fov_default (65-80 del original)
+struct Prof { int scale, picmip, maxTex, aniso; const char *mip; int postfx, fps; float fov; int shadows; };   // fps: com_maxfps (0 = sin limite; con vsync manda la pantalla); fov: cg_fov_default (65-80 del original)
 #ifdef __ANDROID__
 // Fold (presupuesto RSS 1500 MB, >=55 fps): Alto = la configuracion medida hoy (picmip 0, V9_MAXTEX 512, resolucion nativa, postfx)
 // fps: Bajo 30 (bateria/temperatura), Medio y Alto 60 (el presupuesto pide >=55; 90/120 quedan a mano para la pantalla de 120 Hz)
-static const Prof kProf[3] = { { 67, 2, 256, 1, "Force Bilinear", 0, 30, 65 }, { 85, 1, 512, 4, "Force Trilinear", 1, 60, 65 }, { 100, 0, 512, 4, "Force Trilinear", 1, 60, 65 } };
+// shadows (OLA 9): focos con mapa de sombra (sm_enable + sm_maxLights del original). En el Fold Alto va con 2 hasta medirlo en el
+// dispositivo (en el M1 4 focos cuestan ~0,7 ms/frame); 4 = el original, a mano (fila SOMBRAS / sm_maxLights en config.cfg).
+static const Prof kProf[3] = { { 67, 2, 256, 1, "Force Bilinear", 0, 30, 65, 0 }, { 85, 1, 512, 4, "Force Trilinear", 1, 60, 65, 0 }, { 100, 0, 512, 4, "Force Trilinear", 1, 60, 65, 2 } };
 #else
 // fps: Bajo y Medio 60, Alto sin limite (lo marca el vsync de la pantalla)
-static const Prof kProf[3] = { { 67, 2, 256, 1, "Force Bilinear", 0, 60, 65 }, { 85, 1, 512, 4, "Force Trilinear", 1, 60, 65 }, { 100, 0, 1024, 16, "Force Trilinear", 1, 0, 65 } };
+// shadows (OLA 9): Bajo sin sombras, Medio 2 focos, Alto 4 (= sm_maxLights del original)
+static const Prof kProf[3] = { { 67, 2, 256, 1, "Force Bilinear", 0, 60, 65, 0 }, { 85, 1, 512, 4, "Force Trilinear", 1, 60, 65, 2 }, { 100, 0, 1024, 16, "Force Trilinear", 1, 0, 65, 4 } };
 #endif
 static const int kDefQuality = 2;
 static int DefQuality() { const char *e = getenv("H10_QUALITY"); int q = e ? atoi(e) : kDefQuality; return q < 0 || q > 2 ? kDefQuality : q; }
@@ -574,7 +577,8 @@ static void ApplyProf(int q)
     DSetI("h10_renderScale", p.scale); DSetI("h10_maxTex", p.maxTex); DSetI("h10_postfx", p.postfx);
     DSetI("r_texFilterAnisoMin", p.aniso); DSet("r_texFilterMipMode", p.mip); DSetI("com_maxfps", p.fps); { char b[16]; snprintf(b, sizeof b, "%g", p.fov); DSet("cg_fov_default", b); }
     DSetI("ui_r_picmip", p.picmip); DSetI("ui_r_picmip_bump", p.picmip); DSetI("ui_r_picmip_spec", p.picmip); DSetI("ui_r_picmip_manual", 1);
-    fprintf(stderr, "[H10] perfil %d: escala %d%% picmip %d maxtex %d aniso %d %s postfx %d fps %d fov %g\n", q, p.scale, p.picmip, p.maxTex, p.aniso, p.mip, p.postfx, p.fps, p.fov);
+    DSetI("sm_enable", p.shadows > 0); if (p.shadows > 0) DSetI("sm_maxLights", p.shadows);   // OLA 9 (h9_shadow.cpp)
+    fprintf(stderr, "[H10] perfil %d: escala %d%% picmip %d maxtex %d aniso %d %s postfx %d fps %d fov %g sombras %d\n", q, p.scale, p.picmip, p.maxTex, p.aniso, p.mip, p.postfx, p.fps, p.fov, p.shadows);
 }
 static void ApplyDefaults() { const int q = DefQuality(); DSetI("h10_quality", q); ApplyProf(q); fprintf(stderr, "[H10] ajustes por defecto: perfil %d de la plataforma\n", q); }
 static bool MatchProf(int q)
@@ -582,7 +586,8 @@ static bool MatchProf(int q)
     const Prof &p = kProf[q];
     return DI("h10_renderScale") == p.scale && DI("h10_maxTex") == p.maxTex && DI("h10_postfx") == p.postfx && DI("r_texFilterAnisoMin") == p.aniso
         && !strcmp(Dvar_GetVariantString("r_texFilterMipMode"), p.mip) && PendingPicmip() == p.picmip && DI("com_maxfps") == p.fps
-        && fabsf((float)atof(Dvar_GetVariantString("cg_fov_default")) - p.fov) < 0.5f;
+        && fabsf((float)atof(Dvar_GetVariantString("cg_fov_default")) - p.fov) < 0.5f
+        && (DI("sm_enable") ? DI("sm_maxLights") : 0) == p.shadows;
 }
 
 // ---------------------------------------------------------------- config (formato original: players/config.cfg con "seta nombre "valor"")
@@ -607,7 +612,7 @@ static void CfgRead()
 static const char *CfgGet(const char *n) { for (auto &kv : s_cfg) if (!I_stricmp(kv.first.c_str(), n)) return kv.second.c_str(); return nullptr; }
 // solo se cargan los ajustes de este menu (el fichero lleva todos los dvars archivados, como el original)
 static const char *const kCfgKeys[] = { "h10_quality", "h10_renderScale", "h10_maxTex", "h10_postfx", "h10_fog", "h10_reflections", "r_picmip", "r_picmip_bump", "r_picmip_spec",
-    "r_picmip_manual", "r_texFilterAnisoMin", "r_texFilterMipMode", "com_maxfps", "cg_fov_default", "sm_enable" };
+    "r_picmip_manual", "r_texFilterAnisoMin", "r_texFilterMipMode", "com_maxfps", "cg_fov_default", "sm_enable", "sm_maxLights" };
 static void CfgApply(bool onlyExisting)
 {
     for (const char *k : kCfgKeys) if (const char *v = CfgGet(k)) if (!onlyExisting || Dvar_FindVar(k)) Dvar_SetCommand(k, (char *)v);
@@ -907,7 +912,7 @@ static void PatchGraphicsMenu(bool touch)
     Hide(172, 176); Hide(178, 178);   // copias en gris de los valores de esas filas   // sombreados de "no se puede en partida" de las filas habilitadas
     Hide(113, 117); Hide(123, 127); Hide(128, 132); Hide(133, 137);   // shader warming, impactos, cadaveres, brillo: sin soporte en el port
     EnableRow(36, 138);   // FOV (cg_fov_default 65-80, en caliente)
-    // 32 SOMBRAS: la controla ui_showShadowOptions (0 = gris); gancho para la ola 9
+    // 32 SOMBRAS: la controla ui_showShadowOptions (0 = gris); desde la OLA 9 activa (sm_enable, h9_shadow.cpp)
     const int rows[] = { 22, 23, 24, 25, 26, 27, 28, 29, 30, 32, 36 };
     for (int i = 0; i < 11; ++i) {
         const int n = rows[i]; float y = It(RowBase(n))->window.rect.y, h = 17;
@@ -951,10 +956,11 @@ static void SettingsInit()
     if (!Dvar_FindVar("cg_fov")) _Dvar_RegisterFloat("cg_fov", 65, 1, 160, 0, "");
     for (const char *n : kCfgKeys) if (const dvar_s *d = Dvar_FindVar(n)) if (!(d->flags & 1)) Dvar_AddFlags(d, 1);   // archivados: Dvar_WriteVariables los guarda
     if (s_cfgFound) CfgApply(false);
-    else { DSetI("h10_quality", DefQuality()); DSetI("h10_renderScale", s_bootScale); DSetI("h10_maxTex", s_bootMaxTex); DSetI("r_texFilterAnisoMin", p.aniso); DSet("r_texFilterMipMode", p.mip); DSetI("h10_postfx", p.postfx); }
+    else { DSetI("h10_quality", DefQuality()); DSetI("h10_renderScale", s_bootScale); DSetI("h10_maxTex", s_bootMaxTex); DSetI("r_texFilterAnisoMin", p.aniso); DSet("r_texFilterMipMode", p.mip); DSetI("h10_postfx", p.postfx);
+           DSetI("sm_enable", p.shadows > 0); if (p.shadows > 0) DSetI("sm_maxLights", p.shadows); }
     { const int f = DI("com_maxfps"); if (!s_cfgFound || (f != 0 && f != 30 && f != 60 && f != 90 && f != 120)) DSetI("com_maxfps", p.fps); }   // valores de la fila (el 85 del original -> el del perfil)
     { const dvar_s *d = Dvar_FindVar("ui_allow_graphic_change"); if (!d) d = _Dvar_RegisterBool("ui_allow_graphic_change", 1, 0, ""); Dvar_SetBool((dvar_s *)d, true); }
-    { const dvar_s *d = Dvar_FindVar("ui_showShadowOptions"); if (!d) d = _Dvar_RegisterBool("ui_showShadowOptions", 0, 0, ""); Dvar_SetBool((dvar_s *)d, getenv("H10_SHADOWS") && atoi(getenv("H10_SHADOWS"))); }
+    { const dvar_s *d = Dvar_FindVar("ui_showShadowOptions"); if (!d) d = _Dvar_RegisterBool("ui_showShadowOptions", 0, 0, ""); Dvar_SetBool((dvar_s *)d, !(getenv("H10_SHADOWS") && !atoi(getenv("H10_SHADOWS")))); }   // OLA 9: hay sombras de focos
     if (!Cmd_FindCommand("setfromdvar")) Dvar_AddCommands();
     AddCmd("vid_restart", Cmd_H10VidRestart, &s_cmdVid, true); AddCmd("r_applyPicmip", Cmd_H10ApplyPicmip, &s_cmdPic, true);
     AddCmd("updategamerprofile", Cmd_H10Profile, &s_cmdProf, true); AddCmd("ui_animate", Cmd_Nop, &s_cmdAnim, false);

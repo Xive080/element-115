@@ -227,7 +227,15 @@ static void PrepareAllWithSModels()
     for (size_t k = 0; k < n; ++k) H5L_Prepare(1024 + byDist[k].second, si[byDist[k].second].lightingOrigin, half, false);
 }
 static void *H7C_Aligned(size_t n) { void *p = nullptr; return posix_memalign(&p, 16, (n + 15) & ~(size_t)15) ? nullptr : p; }   // aligned_alloc no existe con la API 26 del NDK
-static void DrawSModels(unsigned char techType)
+static void DrawSModels(unsigned char techType, const std::vector<int> &list = s_smVis);
+// OLA 9 (h9_shadow.cpp): smodels de GfxShadowGeometry::smodelIndex de un foco, con la misma cache de vertices, para el pase de sombra
+void H7C_DrawSModelList(const unsigned short *idx, int n, unsigned char techType)
+{
+    if (!s_smOn || !s_w || !idx || n <= 0) return;
+    static std::vector<int> l; l.assign(idx, idx + n);
+    DrawSModels(techType, l);
+}
+static void DrawSModels(unsigned char techType, const std::vector<int> &list)
 {
     static const size_t capBytes = (size_t)(getenv("H7C_SMODEL_MB") ? atof(getenv("H7C_SMODEL_MB")) : 8.0) * 1048576;
     static GfxPackedVertex *tmp; static int tmpCap;
@@ -235,7 +243,8 @@ static void DrawSModels(unsigned char techType)
     float cam[3], ang[3]; H4_GetCam(cam, ang);
     const GfxStaticModelDrawInst *di = s_w->dpvs.smodelDrawInsts.get();
     int drawn = 0, surfs = 0;
-    for (int i : s_smVis) {
+    for (int i : list) {
+        if (i < 0 || (unsigned)i >= s_w->dpvs.smodelCount) continue;
         const GfxStaticModelDrawInst &in = di[i]; XModel *model = in.model.get(); if (!model) continue;
         const float sc = in.placement.scale >= 1.0f ? in.placement.scale : 1.0f;
         const float dist = Vec3Distance(in.placement.origin, cam);
@@ -244,7 +253,8 @@ static void DrawSModels(unsigned char techType)
         XSurface *xsurfs; const int ns = XModelGetSurfaces(model, &xsurfs, lod);
         PTR32(Material) *skins = XModelGetSkins(model, lod);
         bool built = false;
-        if (H5L_Bind) H5L_Bind(H7E_SmLight() && H5L_MaxKey ? (1024 + i <= H5L_MaxKey() ? 1024 + i : -2) : (1024 + i < 2047 ? 1024 + i : 2046));
+        { extern void H9R_ObjectProbe(int) __attribute__((weak)); if (H9R_ObjectProbe && techType != 2) H9R_ObjectProbe(in.reflectionProbeIndex); }   // OLA 9: sonda del smodel (h9_reflect.cpp)
+        if (H5L_Bind && techType != 2) H5L_Bind(H7E_SmLight() && H5L_MaxKey ? (1024 + i <= H5L_MaxKey() ? 1024 + i : -2) : (1024 + i < 2047 ? 1024 + i : 2046));
         for (int s = 0; s < ns; ++s) {
             XSurface *xs = &xsurfs[s]; Material *mtl = skins ? skins[s].get() : nullptr;
             if (!mtl || !xs->vertCount) continue;
@@ -265,6 +275,7 @@ static void DrawSModels(unsigned char techType)
         }
         ++drawn;
     }
+    { extern void H9R_ObjectProbe(int) __attribute__((weak)); if (H9R_ObjectProbe) H9R_ObjectProbe(-1); }
     static int logged; if (getenv("H7C_SMODEL_LOG") && (++logged % 40) == 0) { fprintf(stderr, "[H7C] smodels: %u en el mapa, %zu visibles, %d dibujados, %d superficies, cache %.1f MB\n", s_w->dpvs.smodelCount, s_smVis.size(), drawn, surfs, s_smCacheBytes / 1048576.0); }
 }
 #endif

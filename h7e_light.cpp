@@ -292,6 +292,7 @@ void H5L_Bind(int key) __attribute__((weak));
 int H5L_MaxKey() __attribute__((weak));
 bool H7_VisionSetNaked(const char *name, float seconds) __attribute__((weak));
 void H7_VisionTime(int nowMs) __attribute__((weak));
+void H9V_SysState(const char *sys, const char *state) __attribute__((weak));   // OLA 9 (h9_video.cpp)
 extern void (*g_h0ServerCmdHook)(const client_t *client, const char *cmd);
 
 namespace {
@@ -374,11 +375,12 @@ void ServerCmd(const client_t *client, const char *cmd)
     if (!client || !cmd || cmd[0] != '9' || cmd[1] != ' ') return;
     const int idx = atoi(cmd + 2);
     char cs[1024]; SV_GetConfigstring(idx + 1538, cs, sizeof cs);
-    if (I_stricmp(Info_ValueForKey(cs, "n"), "levelNotify")) return;
     const char *p = strchr(cmd + 2, ' '); if (!p) return;
     char ss[1024]; I_strncpyz(ss, p + 1, sizeof ss);
     std::string st = Info_ValueForKey(ss, "s");
     for (auto &c : st) if (c == '!') c = ' ';
+    if (H9V_SysState) H9V_SysState(Info_ValueForKey(cs, "n"), st.c_str());   // OLA 9: box_indicator (h9_video.cpp)
+    if (I_stricmp(Info_ValueForKey(cs, "n"), "levelNotify")) return;
     fprintf(stderr, "[H7E] levelNotify '%s' t=%d\n", st.c_str(), level.time);
     LevelNotify(st, level.time);
 }
@@ -625,6 +627,13 @@ void H7E_DrawClientModels(unsigned char techType)
             H4_DrawSkinnedSurf(mtl, &xs[s], v.data(), techType);
         }
     }
+}
+// OLA 9 (h9_video.cpp): SetModel del CSC sobre los script_model de cliente con ese targetname (pantallas de la caja). ordinal -1 = todos;
+// name nulo = solo contar. Devuelve cuantos hay con ese targetname.
+int H7E_ClientModelByTn(const char *tn, int ordinal, const char *name)
+{
+    int k = 0; for (size_t j = 0; j < s_models.size(); ++j) if (s_models[j].tn == tn) { if (name && (ordinal < 0 || ordinal == k)) SetModel((int)j, name); ++k; }
+    return k;
 }
 #else
 void H7E_ClientFrame() {}

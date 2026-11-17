@@ -95,9 +95,11 @@ int g_h5vActors, g_h5vSurfs, g_h5vCulled; static int g_h5vLogged;
 double g_h5vSkinMs, g_h5vDrawMs; bool g_h5vDrawPlayer;   // H5d: ms de skinning CPU / envio por frame; dibujar tambien al jugador (camara chase)
 static double H5V_NowMs() { timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec * 1e-6; }
 static int H5V_DObjIsWorld = -1;   // -1: sin decidir; 1: las DObjAnimMat del servidor ya estan en mundo; 0: locales a la entidad
+static const float *s_h5vShadowOrg; static float s_h5vShadowRad;   // OLA 9: filtro del pase de sombra (h9_shadow.cpp)
 static void H5V_DrawActors(unsigned char techType)
 {
-    g_h5vActors = g_h5vSurfs = 0;
+    const bool shadow = s_h5vShadowOrg != nullptr;
+    if (!shadow) g_h5vActors = g_h5vSurfs = 0;
     // Tope de skinning (movil): H5_SKIN_MAXDIST = distancia maxima de dibujo de actores (0 = sin tope) y H5_SKIN_CULL=1 descarta los que
     // quedan fuera del cono de vision (detras o muy de lado). Solo afecta al dibujo: la pose del servidor la calcula el propio juego.
     static const float maxDist = getenv("H5_SKIN_MAXDIST") ? (float)atof(getenv("H5_SKIN_MAXDIST")) : 0.0f;
@@ -107,7 +109,11 @@ static void H5V_DrawActors(unsigned char techType)
     {
         gentity_s *ent = &g_entities[e];
         if (!ent->r.inuse || (ent->s.eType != ET_ACTOR && ent->s.eType != ET_ACTOR_CORPSE && !(g_h5vDrawPlayer && ent->s.eType == ET_PLAYER))) continue;
-        if (maxDist > 0 || cull)
+        if (shadow) {   // OLA 9: solo los actores dentro del radio del foco (esfera de 48 alrededor del origen + 36 de altura)
+            float d2 = 0; for (int j = 0; j < 3; ++j) { const float t = ent->r.currentOrigin[j] + (j == 2 ? 36.0f : 0.0f) - s_h5vShadowOrg[j]; d2 += t * t; }
+            if (d2 > (s_h5vShadowRad + 48.0f) * (s_h5vShadowRad + 48.0f)) continue;
+        }
+        else if (maxDist > 0 || cull)
         {
             float d[3] = { ent->r.currentOrigin[0] - camOrg[0], ent->r.currentOrigin[1] - camOrg[1], ent->r.currentOrigin[2] + 36.0f - camOrg[2] };
             const float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
@@ -133,7 +139,7 @@ static void H5V_DrawActors(unsigned char techType)
             fprintf(stderr, "[H5V] ent %d origen (%.1f,%.1f,%.1f) hueso raiz (%.1f,%.1f,%.1f): DObjAnimMat %s\n", e, ent->r.currentOrigin[0],
                 ent->r.currentOrigin[1], ent->r.currentOrigin[2], mats[0].trans[0], mats[0].trans[1], mats[0].trans[2], H5V_DObjIsWorld ? "en mundo" : "locales a la entidad");
         }
-        { void H5L_Bind(int); H5L_Bind(e); }   // OLA 6b: bloque del atlas de luz y tecnica de esta entidad
+        if (!shadow) { void H5L_Bind(int); H5L_Bind(e); }   // OLA 6b: bloque del atlas de luz y tecnica de esta entidad
         const int numModels = DObjGetNumModels(obj);
         int boneIndex = 0, drewAny = 0;
         for (int m = 0; m < numModels; ++m)
@@ -164,15 +170,23 @@ static void H5V_DrawActors(unsigned char techType)
                 const double sk0 = H5V_NowMs();
                 R_SkinXSurfaceSkinned(xs, &g_h5vSkel[boneIndex], g_h5vVerts);
                 const double sk1 = H5V_NowMs(); g_h5vSkinMs += sk1 - sk0;
-                if (g_h5vLogged < 12) { ++g_h5vLogged; fprintf(stderr, "[H5V] ent %d modelo %d '%s' superficie %d verts=%u tris=%u material '%s' v0=(%.1f,%.1f,%.1f)\n", e, m, model->name.get(), si, xs->vertCount, xs->triCount, mtl->info.name.get(), g_h5vVerts[0].xyz[0], g_h5vVerts[0].xyz[1], g_h5vVerts[0].xyz[2]); }
+                if (!shadow && g_h5vLogged < 12) { ++g_h5vLogged; fprintf(stderr, "[H5V] ent %d modelo %d '%s' superficie %d verts=%u tris=%u material '%s' v0=(%.1f,%.1f,%.1f)\n", e, m, model->name.get(), si, xs->vertCount, xs->triCount, mtl->info.name.get(), g_h5vVerts[0].xyz[0], g_h5vVerts[0].xyz[1], g_h5vVerts[0].xyz[2]); }
                 H4_DrawSkinnedSurf(mtl, xs, g_h5vVerts, techType);
                 g_h5vDrawMs += H5V_NowMs() - sk1;
                 ++g_h5vSurfs; drewAny = 1;
             }
             boneIndex += nb;
         }
-        g_h5vActors += drewAny;
+        if (!shadow) g_h5vActors += drewAny;
     }
+}
+// OLA 9: actores como proyectores de sombra de un foco (tecnica 2, BUILD_SHADOWMAP_DEPTH). Se vuelven a deformar en CPU (coste por foco).
+void H5V_DrawActorsShadow(const float *org, float radius, unsigned char techType)
+{
+    s_h5vShadowOrg = org; s_h5vShadowRad = radius;
+    const int a = g_h5vActors, s = g_h5vSurfs;
+    H5V_DrawActors(techType);
+    g_h5vActors = a; g_h5vSurfs = s; s_h5vShadowOrg = nullptr;
 }
 // Camara del render: H5_VIEW_CAM=player (ojo y angulos del jugador del servidor), look (ojo del jugador mirando al actor mas
 // cercano: por defecto), near (a H5_VIEW_DIST unidades del actor mas cercano, delante de el, mirandolo)
