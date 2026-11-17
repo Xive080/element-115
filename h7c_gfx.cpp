@@ -202,6 +202,7 @@ static void PrepareAllWithSModels()
 {
     if (s_prevPrepareAll) s_prevPrepareAll();
     { extern void H7E_PrepareClientModels() __attribute__((weak)); if (H7E_PrepareClientModels) H7E_PrepareClientModels(); }   // OLA 7e: modelos de cliente
+    { extern void H15F_PrepareDynEnts() __attribute__((weak)); if (H15F_PrepareDynEnts) H15F_PrepareDynEnts(); }   // OLA 15F: DynEnts (h15f_dynent.cpp)
     if (!s_smOn || !s_w) return;
     SModelVisible();
     if (!H5L_Prepare) return;
@@ -278,6 +279,7 @@ void H7C_DrawWorldExtra(unsigned char techType)
         DrawSModels(techType);
     }
     { extern void H7E_DrawClientModels(unsigned char) __attribute__((weak)); if (H7E_DrawClientModels) H7E_DrawClientModels(techType); }   // OLA 7e: script_model de cliente (h7e_light.cpp)
+    { extern void H15F_DrawDynEnts(unsigned char) __attribute__((weak)); if (H15F_DrawDynEnts) H15F_DrawDynEnts(techType); }   // OLA 15F: DynEnts de modelo (papeles, carpetas)
 #endif
 }
 

@@ -69,6 +69,7 @@ srcs="$srcs $H/harness2/ui_p5.cpp"
 srcs="$srcs $H/harness2/h7_gfx.cpp $Z/src/gfx_d3d/rb_postfx.cpp"   # OLA 7g: fidelidad grafica (mips altos, vision set, RB_BloomLDR original)
 for f in $H/harness2/h7c_gfx.cpp $Z/src/gfx_d3d/rb_fog.cpp; do case " $H8_XSRC $EXTRA " in *"$(basename $f)"*) ;; *) srcs="$srcs $f";; esac; done   # OLA 7c: brushmodels/smodels/fov/brazos/HUD + niebla (R_SetFrameFog original); sin duplicar si ya van en H8_XSRC/EXTRA
 case " $H8_XSRC $EXTRA " in *h7e_light.cpp*) ;; *) srcs="$srcs $H/harness2/h7e_light.cpp";; esac   # OLA 7e: luz de la sala + estado de cliente (luces de script, vision por planta, script_model de cliente)
+srcs="$srcs $H/harness2/h15f_dynent.cpp"   # OLA 15F: DynEnts de modelo (pose del mapa, sin fisica); en ejecucion H15F_DYNENT=0 los quita
 for f in h9_shadow.cpp h9_reflect.cpp h9_video.cpp; do [ -f $H/harness2/$f ] || continue; case " $H8_XSRC $EXTRA " in *"$f"*) ;; *) srcs="$srcs $H/harness2/$f";; esac; done   # OLA 9: sombras de focos, sondas de reflejo, pantallas de la caja
 # H5a0: VM GSC original (clientscript) + pegamento/prueba aislada (h5_vm.cpp, H5_VM=1). Lista de nombres de builtins generada de las tablas reales.
 for b in cscr_animtree cscr_compiler cscr_debugger cscr_evaluate cscr_instance cscr_main cscr_memorytree cscr_parser cscr_parsetree cscr_readwrite cscr_save cscr_stringlist cscr_tempmemory cscr_variable cscr_vm cscr_yacc scr_const; do srcs="$srcs $Z/src/clientscript/$b.cpp"; done

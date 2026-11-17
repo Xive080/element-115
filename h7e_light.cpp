@@ -279,8 +279,12 @@ void H7E_Setup(GfxWorld *w)
 #include <clientscript/cscr_stringlist.h>
 #include <xanim/xmodel_utils.h>
 #include <gfx_d3d/r_model_skin.h>
+#include <EffectsCore/fx_system.h>
+#include <time.h>
+#include <ctype.h>
 #include <vector>
 #include "world_h4.h"
+const FxEffectDef *__cdecl FX_Register(char *name);   // h5_fx.cpp (fx_load_obj.cpp extraida): OLA 15F, FX de las luces giratorias
 
 GfxLight *H5L_Lights() __attribute__((weak));
 void H5L_Prepare(int key, const float *lightingOrigin, const float *half, bool hero) __attribute__((weak));
@@ -319,8 +323,9 @@ struct ClLight {
     // fire_flicker
     float dmin = 0.1f, dmax = 0.2f, imin = 0.5f, imax = 1.0f, fTarget = 0, fDiv = 0; int fSteps = 0, fStep = 0, fNext = 0; bool rangeCheck = true;
     std::string modelTn, onModel; int model = -1;
+    std::string spinModel, spinFx, spinTag; int spin = -1; float yaw0 = 0;   // OLA 15F: script_light_on_spin_model / spin_fx / spin_tag (run_spin_model)
 };
-struct ClModel { std::string tn, name; XModel *m = nullptr; float org[3], axis[3][3]; int key = -2; bool vis = false; };
+struct ClModel { std::string tn, name; XModel *m = nullptr; float org[3], axis[3][3]; int key = -2; bool vis = false; float ang[3] = { 0, 0, 0 }; std::string note; float pitchAdd = 0; };   // OLA 15F: angles, script_noteworthy y giro de reloj
 std::vector<ClLight> s_lights; std::vector<ClModel> s_models;
 bool s_on, s_power, s_init; int s_powerAt = -1; bool s_powerDone;
 void (*s_prevHook)(const client_t *, const char *);
@@ -393,6 +398,7 @@ void ClientInit()
             ClModel m; m.name = Str(k, "model"); m.tn = Str(k, "targetname") ? Str(k, "targetname") : "";
             m.m = DB_FindXAssetHeader(ASSET_TYPE_XMODEL, (char *)m.name.c_str(), 1, -1).model; if (!m.m) continue;
             float ang[3] = { 0, 0, 0 }; Vec(k, "origin", m.org); Vec(k, "angles", ang); AnglesToAxis(ang, m.axis);
+            memcpy(m.ang, ang, 12); if (Str(k, "script_noteworthy")) m.note = Str(k, "script_noteworthy");   // OLA 15F (relojes)
             s_models.push_back(m);
         }
         if (lights && !strcmp(cn, "light") && Str(k, "pl#")) {
@@ -417,6 +423,8 @@ void ClientInit()
             if (Str(k, "script_intensity_max")) l.imax = (float)atof(Str(k, "script_intensity_max"));
             l.rangeCheck = !Str(k, "script_light_no_range_check");
             if (Str(k, "script_light_model") && Str(k, "script_light_on_model") && Str(k, "script_light_off_model")) { l.modelTn = Str(k, "script_light_model"); l.onModel = Str(k, "script_light_on_model"); }
+            if (Str(k, "script_light_on_spin_model")) { l.spinModel = Str(k, "script_light_on_spin_model"); l.spinFx = Str(k, "script_light_spin_fx") ? Str(k, "script_light_spin_fx") : ""; l.spinTag = Str(k, "script_light_spin_tag") ? Str(k, "script_light_spin_tag") : ""; }   // OLA 15F
+            l.yaw0 = atan2f(l.dir0[1], l.dir0[0]) * (float)(180.0 / M_PI);   // OLA 15F: yaw de partida de la luz (light.angles[1] de run_spin_model)
             if (l.type == "light_off") { memset(l.cur, 0, 12); l.curInt = 0; }   // light_off: set_light_color((0,0,0)) + set_light_intensity(0)
             s_lights.push_back(l);
         }
@@ -430,6 +438,7 @@ void ClientInit()
     for (auto &l : s_lights) Apply(l);
 }
 
+void H15F_SpinOn(ClLight &l); void H15F_SpinFrame(ClLight &l, int now);   // OLA 15F (abajo)
 void LightsFrame(int now, int dt, const float *cam)
 {
     GfxLight *gl = H5L_Lights ? H5L_Lights() : nullptr; if (!gl) return;
@@ -441,7 +450,7 @@ void LightsFrame(int now, int dt, const float *cam)
             const float i0 = l.type == "light_off" ? 0.0f : l.int0;
             for (int k = 0; k < 3; ++k) l.cur[k] = (c0 ? c0[k] : 0.0f) + (l.color1[k] - (c0 ? c0[k] : 0.0f)) * tc;
             l.curInt = i0 + (l.int1 - i0) * tc; dirty = true;
-            if (t >= 1) { l.side1 = true; if (l.model >= 0) SetModel(l.model, l.onModel.c_str()); }   // light_model_switch "on"
+            if (t >= 1) { l.side1 = true; if (l.model >= 0) SetModel(l.model, l.onModel.c_str()); if (l.model >= 0 && !l.spinModel.empty()) H15F_SpinOn(l); }   // light_model_switch "on" (+ run_spin_model, OLA 15F)
         }
         if (l.type == "fire_flicker" && !(l.mixer && (l.side1 || l.mixT0 >= 0))) {
             const float dx = l.org[0] - cam[0], dy = l.org[1] - cam[1], dz = l.org[2] - cam[2];
@@ -464,11 +473,92 @@ void LightsFrame(int now, int dt, const float *cam)
             SpotLightViewMatrix(gl[l.pl].dir, gl[l.pl].angles[2], gl[l.pl].viewMatrix.m);   // como CG_PrimaryLight con rotationLimit < 1
         }
         if (dirty) Apply(l);
+        if (l.spin >= 0) H15F_SpinFrame(l, now);   // OLA 15F: el modelo giratorio sigue el yaw de la luz (run_spin_model, cada 0,01 s)
     }
     (void)dt;
 }
 std::vector<std::vector<GfxPackedVertex>> s_cache;   // vertices en mundo por modelo y superficie (LOD 0..3)
 std::vector<XModel *> s_cacheModel; std::vector<int> s_cacheLod;
+
+// ---- OLA 15F: pose de los script_model de cliente que se mueven (relojes de _ambient.csc, luces giratorias de _lights.csc)
+void SetPose(int j, const float *ang)
+{
+    ClModel &m = s_models[j]; memcpy(m.ang, ang, 12); AnglesToAxis(ang, m.axis);
+    if (j < (int)s_cacheModel.size()) s_cacheModel[j] = nullptr;   // fuerza a recalcular sus vertices en mundo
+}
+int AddModel(const char *name, const float *org, const float *ang, const char *tn)
+{
+    XModel *xm = DB_FindXAssetHeader(ASSET_TYPE_XMODEL, (char *)name, 1, -1).model; if (!xm) return -1;
+    ClModel m; m.name = name; m.tn = tn ? tn : ""; m.m = xm; memcpy(m.org, org, 12); memcpy(m.ang, ang, 12); AnglesToAxis(ang, m.axis);
+    const int j = (int)s_models.size(), key = 1024 + (int)(rgp.world ? rgp.world->dpvs.smodelCount : 0) + j;
+    m.key = H5L_MaxKey && key <= H5L_MaxKey() ? key : -2;
+    s_models.push_back(m); return j;
+}
+// run_spin_model("on"): spawn(script_model) en el origen del modelo de la luz con sus angulos, SetModel(spin_model) y
+// PlayFXOnTag(level._effect[spin_fx], spin_tag); despues, cada 0,01 s, angles = (x del modelo, light.angles[1], z del modelo).
+// level._effect["test_spin_fx"] = env/light/fx_light_warning (zombie_pentagon_fx.csc). El FX se lanza orientado en la etiqueta y no
+// sigue el giro (el port no tiene DObj de cliente para atornillarlo): queda fijo donde nace.
+void H15F_SpinOn(ClLight &l)
+{
+    static const int on = getenv("H15F_SPIN") ? atoi(getenv("H15F_SPIN")) : 1; if (!on || l.spin >= 0 || l.model < 0) return;
+    const ClModel src = s_models[l.model];
+    l.spin = AddModel(l.spinModel.c_str(), src.org, src.ang, "spin_model"); if (l.spin < 0) return;
+    const char *fxName = l.spinFx == "test_spin_fx" ? "env/light/fx_light_warning" : nullptr;
+#ifdef H5FX
+    const FxEffectDef *fx = fxName ? FX_Register((char *)fxName) : nullptr;
+#else
+    const FxEffectDef *fx = nullptr;   // sin efectos compilados (H5FX=0)
+#endif
+    float tag[4][3]; memcpy(tag, s_models[l.spin].axis, 36); memcpy(tag[3], src.org, 12);
+    if (!l.spinTag.empty()) {
+        unsigned char bi = 0xFF; const unsigned nm = SL_FindString(l.spinTag.c_str(), SCRIPTINSTANCE_SERVER);
+        const XModel *xm = s_models[l.spin].m;
+        if (nm && XModelGetBoneIndex(xm, nm, 0, &bi) && bi != 0xFF) {
+            const DObjAnimMat *bp = XModelGetBasePose(xm);
+            if (bp) for (int k = 0; k < 3; ++k) tag[3][k] = src.org[k] + bp[bi].trans[0] * s_models[l.spin].axis[0][k] + bp[bi].trans[1] * s_models[l.spin].axis[1][k] + bp[bi].trans[2] * s_models[l.spin].axis[2][k];
+        }
+    }
+#ifdef H5FX
+    if (fx) FX_PlayOrientedEffect(0, fx, FX_GetSystem(0)->system.msecNow, tag[3], tag);
+#endif
+    fprintf(stderr, "[H15F] luz %d: modelo giratorio '%s' (%d) y FX %s en %.0f %.0f %.0f\n", l.pl, l.spinModel.c_str(), l.spin, fx ? fxName : "(ninguno)", tag[3][0], tag[3][1], tag[3][2]);
+}
+void H15F_SpinFrame(ClLight &l, int now)
+{
+    if (l.spin < 0 || l.model < 0) return;
+    const float yaw = l.yaw0 + (l.yawRate != 0 ? fmodf(l.yawRate * now / 1000.0f, 360.0f) : 0.0f);
+    const float ang[3] = { s_models[l.model].ang[0], yaw, s_models[l.model].ang[2] };
+    SetPose(l.spin, ang);
+}
+// _ambient.csc clocks_init / clock_run: hour_hand, minute_hand, second_hand (targetname) giran con la hora del sistema
+// (GetSystemTime local; las horarias con script_noteworthy = zona usan GetSystemTime(1) = GMT + desfase, como el script, incluido
+// que solo resta 12 una vez). RotatePitch suma al pitch: primero hand_time * rotate + first_rotate, luego rotate_bit por segundo.
+// H15F_CLOCK="hh:mm:ss" fija la hora (pruebas reproducibles; la GMT se toma igual). H15F_CLOCKS=0 los deja quietos.
+void ClocksFrame()
+{
+    static int on = -1; static long t0; static int lh, lm, ls, gh; if (on < 0) {
+        on = getenv("H15F_CLOCKS") ? atoi(getenv("H15F_CLOCKS")) : 1; t0 = (long)time(nullptr);
+        time_t tt = (time_t)t0; struct tm lt, gt; localtime_r(&tt, &lt); gmtime_r(&tt, &gt); lh = lt.tm_hour; lm = lt.tm_min; ls = lt.tm_sec; gh = gt.tm_hour;
+        if (const char *e = getenv("H15F_CLOCK")) { sscanf(e, "%d:%d:%d", &lh, &lm, &ls); gh = lh; } }
+    if (!on) return;
+    const float el = (float)((long)time(nullptr) - t0);   // segundos enteros transcurridos (un RotatePitch por cambio de GetSystemTime)
+    int h12 = lh > 12 ? lh - 12 : lh; if (h12 == 0) h12 = 12;
+    for (size_t j = 0; j < s_models.size(); ++j) { ClModel &m = s_models[j]; float add;
+        if (m.tn == "hour_hand") {
+            int hour = h12;
+            if (!m.note.empty()) { std::string z = m.note; for (auto &c : z) c = (char)tolower(c);
+                static const struct { const char *n; int o; } tz[] = { { "honolulu", -10 }, { "alaska", -9 }, { "los angeles", -8 }, { "denver", -7 }, { "chicago", -6 },
+                    { "new york", -5 }, { "halifax", -4 }, { "greenland", -3 }, { "london", 0 }, { "paris", 1 }, { "helsinki", 2 }, { "moscow", 3 }, { "china", 8 } };
+                for (auto &t : tz) if (z == t.n) { hour = gh + t.o; break; }
+                if (hour < 1) hour += 12; if (hour > 12) hour -= 12; }
+            add = hour * 30.0f + (lm * 60 + ls) * (30.0f / 3600.0f) + el * (30.0f / 3600.0f);
+        } else if (m.tn == "minute_hand") add = lm * 6.0f + ls * 0.1f + el * 0.1f;
+        else if (m.tn == "second_hand") add = ls * 6.0f + el * 6.0f;
+        else continue;
+        if (add == m.pitchAdd) continue;
+        float ang[3] = { m.ang[0] - m.pitchAdd + add, m.ang[1], m.ang[2] }; m.pitchAdd = add; SetPose((int)j, ang);
+    }
+}
 } // namespace
 
 void H7E_ClientFrame()
@@ -480,6 +570,7 @@ void H7E_ClientFrame()
     if (H7_VisionTime) H7_VisionTime(now);
     float cam[3], ang[3]; H4_GetCam(cam, ang);
     LightsFrame(now, dt, cam);
+    ClocksFrame();   // OLA 15F: agujas de los relojes
     {   // H7E_NOTIFY="ms:evento,..." (prueba): inyecta levelNotify de cliente (p.ej. "100:vis3") como si llegaran del servidor
         static std::vector<std::pair<int, std::string>> q; static bool parsed;
         if (!parsed) { parsed = true; if (const char *e = getenv("H7E_NOTIFY")) { std::string a = e; size_t p = 0;

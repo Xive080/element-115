@@ -109,9 +109,23 @@ __attribute__((weak)) double __cdecl R_GetAdjustedLodDist(float dist, XModelLodR
 // R_AllocModelLighting (r_model_lighting.cpp, iluminacion de modelos por la rejilla de luz) no esta en el harness: el lote de
 // fragmentos necesita un handle distinto de 0 para dibujarse (ShardGroup::GenerateVerts). Se da 1 y sin sonda de reflejo.
 #include <gfx_d3d/r_model_lighting.h>
-__attribute__((weak)) unsigned int __cdecl R_AllocModelLighting(float *, float, bool, unsigned short *cached, unsigned int (__cdecl *)(const void *), const void *, GfxLightingInfo *out)
+// OLA 15F: cada grupo de fragmentos pide su luz del lightgrid en su origen (atlas de h5_light, como actores y smodels) en vez de la
+// neutra/la ultima enlazada: handle 0xF000 | n (n = 1..4095, cacheado en ShardGroup::lightingHandle como el original) -> clave de
+// H5L = H5L_MaxKey() - 4096 + n. H15F_GLASSLIGHT=0 vuelve a lo de antes (handle 1, coordenadas que hubiera).
+void H5L_Prepare(int key, const float *lightingOrigin, const float *half, bool hero) __attribute__((weak));
+void H5L_Bind(int key) __attribute__((weak));
+int H5L_MaxKey() __attribute__((weak));
+static bool H15F_GlassLight() { static const int on = getenv("H15F_GLASSLIGHT") ? atoi(getenv("H15F_GLASSLIGHT")) : 1; return on && H5L_Prepare && H5L_Bind && H5L_MaxKey; }
+__attribute__((weak)) unsigned int __cdecl R_AllocModelLighting(float *origin, float, bool, unsigned short *cached, unsigned int (__cdecl *)(const void *), const void *, GfxLightingInfo *out)
 {
-    if (cached) *cached = 1; if (out) memset(out, 0, sizeof *out); return 1;
+    if (out) memset(out, 0, sizeof *out);
+    if (!H15F_GlassLight() || !origin) { if (cached) *cached = 1; return 1; }
+    static unsigned next;
+    unsigned short h = cached ? *cached : 0;
+    if ((h & 0xF000) != 0xF000 || !(h & 0x0FFF)) { next = next % 4095 + 1; h = (unsigned short)(0xF000 | next); if (cached) *cached = h; }
+    static const float half[3] = { 8, 8, 8 };
+    H5L_Prepare(H5L_MaxKey() - 4096 + (h & 0x0FFF), origin, half, false);
+    return h;
 }
 
 // ---- Matematica de fisica que usa GlassPhysics (la fisica propia de los fragmentos). Los ficheros donde vive en el decomp
@@ -203,8 +217,9 @@ __attribute__((weak)) void __cdecl R_StreamTouchMaterial(Material *) {}
 // R_SetModelLightingCoordsForSource (r_model_lighting.cpp, sin portar: atlas del lightgrid por handle): el codemesh de los fragmentos
 // pide la luz de modelo; se usan las coordenadas del volumen neutro/atlas del arnes (world_h4/h5_light), como los modelos.
 extern float g_h4ModelLightCoords[4];
-__attribute__((weak)) void __cdecl R_SetModelLightingCoordsForSource(unsigned __int16, GfxCmdBufSourceState *source)
+__attribute__((weak)) void __cdecl R_SetModelLightingCoordsForSource(unsigned __int16 h, GfxCmdBufSourceState *source)
 {
+    if ((h & 0xF000) == 0xF000 && (h & 0x0FFF) && H15F_GlassLight()) H5L_Bind(H5L_MaxKey() - 4096 + (h & 0x0FFF));   // OLA 15F: luz del grupo de fragmentos
     memcpy(source->input.consts[CONST_SRC_CODE_BASE_LIGHTING_COORDS], g_h4ModelLightCoords, 16);
     ++source->constVersions[CONST_SRC_CODE_BASE_LIGHTING_COORDS];
 }

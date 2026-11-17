@@ -56,7 +56,7 @@ static const char *NM(int k, const void *p) { return g_traceName && p && !TraceO
 
 // ---- objetos
 struct TTex : IDirect3DTexture9 { void *g = nullptr; int id; UINT w, h, levels; DWORD usage; D3DFORMAT fmt; D3DPOOL pool; std::vector<std::vector<uint8_t>> mem; };
-struct TCube : IDirect3DCubeTexture9 { void *g = nullptr; int id; UINT e, levels; D3DFORMAT fmt; std::vector<std::vector<uint8_t>> mem; };
+struct TCube : IDirect3DCubeTexture9 { void *g = nullptr; int id; UINT e, levels; DWORD usage = 0; D3DPOOL pool = D3DPOOL_MANAGED; D3DFORMAT fmt; std::vector<std::vector<uint8_t>> mem; };
 struct TVol : IDirect3DVolumeTexture9 { void *g = nullptr; int id; UINT w, h, d, levels; D3DFORMAT fmt; std::vector<std::vector<uint8_t>> mem; };
 struct TVB : IDirect3DVertexBuffer9 { void *g = nullptr; int id; UINT len; DWORD usage; std::vector<uint8_t> mem; };
 struct TIB : IDirect3DIndexBuffer9 { bool inflight = false; void *g = nullptr; int id; UINT len; D3DFORMAT fmt; DWORD usage; std::vector<uint8_t> mem; };
@@ -226,8 +226,8 @@ HRESULT IDirect3DDevice9::CreateVolumeTexture(UINT w, UINT h, UINT d, UINT lv, D
     if (GLON) t->g = g9::TexCreate(1, w, h, d, t->levels, 0, f, OWNMEM ? nullptr : &t->mem);
 #endif
     RegAdd(t, K_VOL); *pp = t; return 0; }
-HRESULT IDirect3DDevice9::CreateCubeTexture(UINT e, UINT lv, DWORD cu, D3DFORMAT f, D3DPOOL, PtrRt32<IDirect3DCubeTexture9> *pp, HANDLE *)
-{ TCube *t = new TCube(); t->id = ++g_nid; t->e = e; t->fmt = f; t->levels = LevelCount(e, e, lv); if (!OWNMEM) { t->mem.resize(t->levels * 6); UINT p; for (unsigned i = 0; i < t->levels * 6; ++i) t->mem[i].assign(LevelBytes(f, e >> (i % t->levels), e >> (i % t->levels), &p), 0); } L("CreateCubeTexture tex#%d edge=%u fmt=%s", t->id, e, FmtName(f));
+HRESULT IDirect3DDevice9::CreateCubeTexture(UINT e, UINT lv, DWORD cu, D3DFORMAT f, D3DPOOL pool, PtrRt32<IDirect3DCubeTexture9> *pp, HANDLE *)
+{ TCube *t = new TCube(); t->id = ++g_nid; t->e = e; t->fmt = f; t->usage = cu; t->pool = pool; t->levels = LevelCount(e, e, lv); if (!OWNMEM) { t->mem.resize(t->levels * 6); UINT p; for (unsigned i = 0; i < t->levels * 6; ++i) t->mem[i].assign(LevelBytes(f, e >> (i % t->levels), e >> (i % t->levels), &p), 0); } L("CreateCubeTexture tex#%d edge=%u fmt=%s", t->id, e, FmtName(f));
 #ifdef G9BE
     if (GLON) t->g = g9::TexCreate(2, e, e, 1, t->levels, cu, f, OWNMEM ? nullptr : &t->mem);
 #endif
@@ -383,6 +383,19 @@ HRESULT IDirect3DCubeTexture9::LockRect(D3DCUBEMAP_FACES f, UINT lv, D3DLOCKED_R
     if (OWNMEM) { UINT rp = 0, sp = 0; void *m = g9::TexLock((g9::Tex *)t->g, (int)f, (int)lv, &rp, &sp, fl); if (!m) return D3DERR_INVALIDCALL; lr->Pitch = rp; lr->pBits = m; return 0; }
 #endif
     UINT p; LevelBytes(t->fmt, t->e >> lv, t->e >> lv, &p); lr->Pitch = p; lr->pBits = t->mem[f * t->levels + lv].data(); return 0; }
+// OLA 15F: consultas de cubo con el comportamiento D3D9 (antes eran los weak por defecto: 0 niveles, descripcion vacia, sin superficie).
+// GetCubeMapSurface da la superficie (cara, nivel) como GetSurfaceLevel: con backend vk es render target si el cubo se creo con
+// D3DUSAGE_RENDERTARGET (g9::SurfFromTex, vista 2D de una capa) -> sirve para pintar las 6 caras de un reflejo con SetRenderTarget.
+DWORD IDirect3DCubeTexture9::GetLevelCount() { return static_cast<TCube *>(this)->levels; }
+HRESULT IDirect3DCubeTexture9::GetLevelDesc(UINT lv, D3DSURFACE_DESC *d) { TCube *t = static_cast<TCube *>(this); if (!d || lv >= t->levels) return D3DERR_INVALIDCALL;
+    memset(d, 0, sizeof *d); d->Format = t->fmt; d->Type = D3DRTYPE_SURFACE; d->Width = d->Height = t->e >> lv ? t->e >> lv : 1; d->Usage = t->usage; d->Pool = t->pool; return 0; }
+HRESULT IDirect3DCubeTexture9::GetCubeMapSurface(D3DCUBEMAP_FACES f, UINT lv, IDirect3DSurface9 **pp) { TCube *t = static_cast<TCube *>(this);
+    if (!pp || lv >= t->levels || (unsigned)f > 5) return D3DERR_INVALIDCALL;
+    TSurf *s = new TSurf(); s->id = ++g_nid; s->w = s->h = t->e >> lv ? t->e >> lv : 1; s->fmt = t->fmt; s->usage = t->usage; s->what = "CubeSurface";
+#ifdef G9BE
+    if (GLON) s->g = g9::SurfFromTex((g9::Tex *)t->g, (int)f, (int)lv, s->w, s->h);
+#endif
+    RegAdd(s, K_SURF); if (OWNMEM) { s->parent = static_cast<IUnknown *>(t); RegAddRef(s->parent); } *pp = s; return 0; }
 HRESULT IDirect3DCubeTexture9::UnlockRect(D3DCUBEMAP_FACES f, UINT lv) {
 #ifdef G9BE
     if (OWNMEM) g9::TexUnlock((g9::Tex *)static_cast<TCube *>(this)->g, (int)f, (int)lv); else

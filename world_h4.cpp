@@ -136,6 +136,9 @@ static void BuildBatches(GfxWorld *w)
     for (int i = 0; i < w->surfaceCount; ++i) {
         Material *m = w->dpvs.surfaces[i].material.get(); if (!m) continue;
         { extern bool H7C_SkipWorldSurf(GfxWorld *, int) __attribute__((weak)); if (H7C_SkipWorldSurf && H7C_SkipWorldSurf(w, i)) continue; }   // OLA 7c: brushmodels con su entidad
+        if (getenv("H15F_SKYLOG") && strstr(m->info.name.get(), "sky")) { const GfxSurface &q = w->dpvs.surfaces[i];   // OLA 15F: donde esta el "cielo"
+            fprintf(stderr, "[H15F] cielo surf %d %s tris=%d (%.0f %.0f %.0f)-(%.0f %.0f %.0f)\n", i, m->info.name.get(), (int)q.tris.triCount,
+                    q.bounds[0][0], q.bounds[0][1], q.bounds[0][2], q.bounds[1][0], q.bounds[1][1], q.bounds[1][2]); }
         if (!getenv("H4_SKY") && strstr(m->info.name.get(), "sky")) { ++g_skyskip; continue; }
         by[{ m, byPrim ? (int)w->dpvs.surfaces[i].primaryLightIndex : 0 }].push_back((unsigned short)i);
     }
@@ -188,6 +191,9 @@ static void CullBatches(const Frustum *fr)
     }
 }
 unsigned char (*g_h4WorldPrimaryTech)(unsigned char primaryLightIndex);   // h5_light.cpp: tecnica y constantes de la luz primaria
+// OLA 9 (h9_shadow.cpp): vista del frame y luces primarias de los lotes visibles en el ultimo culling (como scene.shadowableLightIsUsed)
+const GfxViewParms *H4_ViewParms() { return &g_vp; }
+void H4_LightsUsed(unsigned char *used, unsigned n) { memset(used, 0, n); for (size_t b = 0; b < g_batches.size(); ++b) if (g_batches[b].prim < n && !g_prim[b].empty() && g_prim[b][0]) used[g_batches[b].prim] = 1; }
 static void DrawBatch(size_t b, unsigned char techType)
 {
     GfxCmdBufContext ctx = gfxCmdBufContext;
@@ -400,6 +406,7 @@ static void RenderFrame(GfxWorld *w, const Cam &cam, int W, int H, float fovX, u
     InitInput(w);
     R_InitCmdBufSourceState(&gfxCmdBufSourceState, &g_in, 1);
     R_InitLocalCmdBufState(gfxCmdBufContext.state);
+    { extern void H9_PreFrame(int, int) __attribute__((weak)); if (H9_PreFrame) { g_cw = w; H9_PreFrame(W, H); } }   // OLA 9: mapas de sombra de focos y pantallas (h9_shadow.cpp)
     { extern void H7D_FloatZPrepass(void (*)(unsigned char, int, int), int, int) __attribute__((weak)); if (H7D_FloatZPrepass) { g_cw = w; H7D_FloatZPrepass(DrawWorldOnly, W, H); } }   // OLA 7d: prepase floatz (h5_fx.cpp)
     R_SetRenderTargetSize(gfxCmdBufContext.source, R_RENDERTARGET_FRAME_BUFFER);
     R_SetRenderTarget(gfxCmdBufContext, R_RENDERTARGET_FRAME_BUFFER);
