@@ -88,7 +88,7 @@ if [ -n "$H5G" ]; then
   srcs="$srcs $Z/src/cgame/cg_weapons.cpp"   # H5e: viewmodel/animacion de arma del cliente ORIGINAL
   if [ "${H13:-0}" != 0 ]; then   # OLA 13: HUD ORIGINAL (h13_hud.cpp + TUs de cgame enteras por envoltorio h13/h13w_*.cpp; H13=0 al compilar lo quita)
     for w in $H/harness2/h13/h13w_*.cpp; do s=$Z/$(sed -n 's/^#include <\(src\/.*\)>/\1/p' $w); [ $s -nt $w ] && touch $w; srcs="$srcs $w"; done
-    srcs="$srcs $H/harness2/h13_hud.cpp"
+    srcs="$srcs $H/harness2/h13_hud.cpp $H/harness2/h13_batt.cpp"   # OLA 17: bateria del movil en el HUD
     mkdir -p $O/gen; python3 -I $H/harness2/h5_extract.py --noinc $Z/src/ui/ui_shared_obj.cpp "MenuList *__cdecl UI_LoadMenus(const char *menuFile, int imageTrack)||MenuList *__cdecl UI_LoadMenus_FastFile(const char *menuFile)" $O/gen/h13_uiload.inc || exit 1   # el resto de ui_shared_obj es el cargador de .menu sueltos
     python3 -I $H/harness2/h5_extract.py --noinc $Z/src/cgame_mp/cg_servercmds_mp.cpp "void __cdecl CG_MenuShowNotify(int localClientNum, int menuToShow)" $O/gen/h13_notify.inc || exit 1
     python3 -I $H/harness2/h5_extract.py --noinc $Z/src/cgame/cg_playerstate.cpp "void __cdecl CG_DamageFeedback(int localClientNum, int yawByte, int pitchByte, int damage)" $O/gen/h13_dmgfb.inc || exit 1   # indicador de dano direccional + destello (CG_TransitionPlayerState)   # fundidos del HUD (municion, dpad, salud); el resto de la TU son comandos de red

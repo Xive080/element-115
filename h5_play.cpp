@@ -452,7 +452,9 @@ static void H5F_DrawHud(int W, int H)
 // OLA 10: menus de ajustes originales (h10_settings.cpp) encima del HUD, en la misma lista 2D
 void (*g_h10Draw2D)(int W, int H);
 static bool s_hudOn = true;
-static void H5F_Draw2D(int W, int H) { if (s_hudOn) H5F_DrawHud(W, H); if (g_h10Draw2D) g_h10Draw2D(W, H); }
+// OLA 17: bateria del movil (h13_batt.cpp) encima de todo, tambien con la pausa/ajustes abiertos. Puntero de datos: sin H13 queda a 0.
+extern void (*g_h13DrawBattery)(int W, int H);
+static void H5F_Draw2D(int W, int H) { if (s_hudOn) H5F_DrawHud(W, H); if (g_h10Draw2D) g_h10Draw2D(W, H); if (g_h13DrawBattery) g_h13DrawBattery(W, H); }
 // primitivas 2D para g_h5pDrawTouch (renderer original: material "white" y fonts/normalFont, como el HUD)
 // App: la partida termino (game over del GSC: sessionState de intermedio)
 bool H5P_GameOver() { return s_fHave && s_f.sessionState == SESS_STATE_INTERMISSION; }

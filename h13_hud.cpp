@@ -75,7 +75,7 @@ static double NowMs() { timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t
 //   3) H10_SAFE=l,t,r,b (pixeles) para simularlo en el Mac
 // y encima un margen minimo por lado: H13_SAFE_MIN (fraccion del lado corto, por defecto 0.015). Devuelve l,t,r,b en pixeles.
 extern bool (*g_h10GetSafeInsets)(int W, int H, float out[4]);
-static void H13_SafeInsets(int W, int H, float out[4])
+void H13_SafeInsets(int W, int H, float out[4])   // tambien la usa la bateria (h13_batt.cpp, OLA 17)
 {
     out[0] = out[1] = out[2] = out[3] = 0;
     if (!(g_h10GetSafeInsets && g_h10GetSafeInsets(W, H, out))) {

@@ -612,7 +612,7 @@ static void CfgRead()
 static const char *CfgGet(const char *n) { for (auto &kv : s_cfg) if (!I_stricmp(kv.first.c_str(), n)) return kv.second.c_str(); return nullptr; }
 // solo se cargan los ajustes de este menu (el fichero lleva todos los dvars archivados, como el original)
 static const char *const kCfgKeys[] = { "h10_quality", "h10_renderScale", "h10_maxTex", "h10_postfx", "h10_fog", "h10_reflections", "r_picmip", "r_picmip_bump", "r_picmip_spec",
-    "r_picmip_manual", "r_texFilterAnisoMin", "r_texFilterMipMode", "com_maxfps", "cg_fov_default", "sm_enable", "sm_maxLights" };
+    "r_picmip_manual", "r_texFilterAnisoMin", "r_texFilterMipMode", "com_maxfps", "cg_fov_default", "sm_enable", "sm_maxLights", "h13_battery" };
 static void CfgApply(bool onlyExisting)
 {
     for (const char *k : kCfgKeys) if (const char *v = CfgGet(k)) if (!onlyExisting || Dvar_FindVar(k)) Dvar_SetCommand(k, (char *)v);
@@ -698,9 +698,9 @@ static void AddCmd(const char *n, void (*f)(), cmd_function_s *c, bool replace) 
 
 // ---------------------------------------------------------------- filas del menu original options_graphics
 // cada fila N son 5 items: barra, barra resaltada ('ui_highlight' == N), etiqueta, etiqueta resaltada y valor
-static menuDef_t *s_og; static ExpressionStatement s_never, s_hl; static bool s_neverOk;
+static const char *s_no, *s_yes; static menuDef_t *s_og, *s_rows; static ExpressionStatement s_never, s_hl; static bool s_neverOk;   // s_rows: menu de las filas que se tocan (options_graphics; options_game en la OLA 17)
 static int RowBase(int n) { static const int b[] = { 63, 68, 73, 83, 88, 93, 98, 103, 108, 113, 118, 123, 128, 133, 138 }; return b[n - 22]; }
-static itemDef_s *It(int i) { return s_og->items[i].get(); }
+static itemDef_s *It(int i) { return s_rows->items[i].get(); }
 static ExpressionStatement HlExp(int n)
 {
     ExpressionStatement e = s_hl; expressionRpn *r = (expressionRpn *)Ptr32_ArenaAlloc(sizeof(expressionRpn) * e.numRpn, 4); memcpy(r, s_hl.rpn.get(), sizeof(expressionRpn) * e.numRpn);
@@ -761,7 +761,10 @@ static void PatchRootMenu()
         menuDef_t *m = s_dc->Menus[k]; const char *name = m->window.name ? m->window.name.get() : "";
         if (strncmp(name, "options_", 8) || !strcmp(name, "options_controls_new_pc")) continue;   // todos los paneles repiten la columna
         int voice = -1, game = -1;
-        for (int i = 3; i < m->itemCount; ++i) { if (HasTextConst(m->items[i].get(), "@MENU_VOICECHAT_CAPS")) voice = i; if (HasTextConst(m->items[i].get(), "@PATCH_GAME_CAPS")) game = i; }   // la ultima de la fila (etiqueta resaltada)
+        // la ultima de la fila (etiqueta resaltada). Solo la columna izquierda (x < -110): en options_game el titulo del panel derecho
+        // tambien es @PATCH_GAME_CAPS y antes se tomaba ese, que bajaba al hueco de VOICE CHAT (OLA 17)
+        for (int i = 3; i < m->itemCount; ++i) { if (m->items[i]->window.rect.x >= -110) continue;
+            if (HasTextConst(m->items[i].get(), "@MENU_VOICECHAT_CAPS")) voice = i; if (HasTextConst(m->items[i].get(), "@PATCH_GAME_CAPS")) game = i; }
         if (voice < 3) continue;
         const float y = m->items[voice]->window.rect.y;
         for (int i = voice - 3; i <= voice; ++i) m->items[i]->visibleExp = s_never;
@@ -895,11 +898,13 @@ static bool TouchScroll(float dy, float x) { TMenu *t = ScrollMenu(x); if (!t) r
 static void PatchGraphicsMenu(bool touch)
 {
     s_og = Menus_FindByName(s_dc, "options_graphics"); if (!s_og || s_og->itemCount < 181) { fprintf(stderr, "[H10] options_graphics inesperado (%d items): sin cambios\n", s_og ? s_og->itemCount : 0); return; }
+    s_rows = s_og;
     s_never = It(138)->visibleExp; s_neverOk = true;   // 'ui_multiplayer' (falso en zombies) antes de habilitar el FOV
     s_hl = It(99)->visibleExp;       // resaltado de la fila 28, siempre activa
     multiDef_s *yesno = It(72)->typeData.textDef->textTypeData.focusItemDef->focusTypeData.multi.get();
     multiDef_s *texq = It(112)->typeData.textDef->textTypeData.focusItemDef->focusTypeData.multi.get();
     const char *no = yesno->dvarList[0].get(), *yes = yesno->dvarList[1].get(), *lo = texq->dvarList[1].get(), *nor = texq->dvarList[2].get(), *hi = texq->dvarList[3].get(), *ex = texq->dvarList[4].get();
+    s_no = no; s_yes = yes;   // OLA 17: el multi del item 72 pasa abajo a RENDER RESOLUTION: NO/YES se guardan antes para la fila de bateria
     // filas nuevas en el sitio de las de modo de video (en partida el original las deja en gris: aqui se usan para lo que el port cambia)
     EnableRow(22, 63); Label(63, "QUALITY PRESET"); Multi(63, "h10_quality", { { lo, 0 }, { nor, 1 }, { hi, 2 }, { "CUSTOM", 3 } });
     EnableRow(23, 68); Label(68, "RENDER RESOLUTION"); Multi(68, "h10_renderScale", { { "50%", 50 }, { "67%", 67 }, { "75%", 75 }, { "85%", 85 }, { "100%", 100 } });
@@ -923,6 +928,35 @@ static void PatchGraphicsMenu(bool touch)
         if (n == 32) { for (int b = 164; b <= 169; ++b) setY(b, 0); setY(179, 0); setY(180, 0); }
     }
     fprintf(stderr, "[H10] options_graphics: filas del port (disposicion original%s)\n", touch ? "; el tactil las agranda despues" : "");
+}
+
+// OLA 17: fila BATTERY INDICATOR (h13_battery: indicador de bateria del HUD, h13_batt.cpp) en el panel GAME, justo debajo de SUBTITLES.
+// Usa la fila 24 del original (items 83-87: ENABLE CONSOLE de MP, nunca visible en zombies) con el mismo patron de 5 items que las
+// filas de Graphics. Las filas 23 (MATURE / ENABLE CONSOLE, items 68-82) tampoco salen en zombies (cg_allow_mature / ui_allowConsole):
+// se apartan del todo para que nunca tapen la nueva. Solo si el indicador puede salir: Android, o H13_BATT_SIM en el Mac; H13_BATT=0 la quita.
+static bool BattRow()
+{
+    if (getenv("H13_BATT") && !atoi(getenv("H13_BATT"))) return false;
+#ifdef __ANDROID__
+    return true;
+#else
+    return getenv("H13_BATT_SIM") != nullptr;
+#endif
+}
+static void PatchGameMenu()
+{
+    menuDef_t *m = Menus_FindByName(s_dc, "options_game"); if (!s_og || !m || !BattRow()) return;
+    if (!s_no || !s_yes) return;
+    const char *no = s_no, *yes = s_yes;
+    s_rows = m;
+    const bool ok = m->itemCount >= 98 && It(87)->type == 10 && It(83)->window.rect.y == It(87)->window.rect.y && It(68)->window.rect.y > It(63)->window.rect.y;
+    if (ok) {
+        Hide(68, 82);
+        EnableRow(24, 83); Label(83, "BATTERY INDICATOR"); Multi(83, "h13_battery", { { no, 0 }, { yes, 1 } });
+        MoveRow(83, It(68)->window.rect.y, 17);
+    }
+    fprintf(stderr, "[H10] options_game: %s\n", ok ? "fila BATTERY INDICATOR (h13_battery) bajo SUBTITLES" : "disposicion inesperada, sin fila de bateria");
+    s_rows = s_og;
 }
 
 // ---------------------------------------------------------------- estado por frame
@@ -952,6 +986,7 @@ static void SettingsInit()
     RegIA("h10_quality", DefQuality(), 0, 3); RegIA("h10_renderScale", p.scale, 25, 100); RegIA("h10_maxTex", p.maxTex, 64, 4096); RegIA("h10_postfx", p.postfx, 0, 1);
     RegIA("h10_fog", 1, 0, 1); RegIA("h10_reflections", 1, 0, 1);   // ganchos para la ola 9 (niebla / reflejos), sin fila todavia
     RegIA("com_maxfps", 0, 0, 1000);
+    RegIA("h13_battery", 1, 0, 1);   // OLA 17: indicador de bateria (h13_batt.cpp), visible por defecto
     if (!Dvar_FindVar("cg_fov_default")) _Dvar_RegisterFloat("cg_fov_default", 65, 65, 80, 1, "");
     if (!Dvar_FindVar("cg_fov")) _Dvar_RegisterFloat("cg_fov", 65, 1, 160, 0, "");
     for (const char *n : kCfgKeys) if (const dvar_s *d = Dvar_FindVar(n)) if (!(d->flags & 1)) Dvar_AddFlags(d, 1);   // archivados: Dvar_WriteVariables los guarda
@@ -989,7 +1024,7 @@ void H10_Draw(int W, int H)
         if (const char *d = getenv("H10_RAW")) { std::string l = d; for (size_t p = 0; p < l.size();) { size_t q = l.find(',', p); if (q == std::string::npos) q = l.size(); H10_DumpRaw(l.substr(p, q - p).c_str()); p = q + 1; } }
         if (const char *d = getenv("H10_ITEMS")) { char mn[64]; int a = 0, b = 0; if (sscanf(d, "%63[^:]:%d:%d", mn, &a, &b) == 3) H10_DumpItems(mn, a, b); }
         SettingsInit();
-        if (!getenv("H10_ORIG")) { PatchGraphicsMenu(TouchLayout()); if (s_neverOk) { PatchRootMenu(); if (!getenv("H10_KEEPCONTROLS")) PatchControlsTab(); if (TouchLayout()) TouchLayoutInit(); } }
+        if (!getenv("H10_ORIG")) { PatchGraphicsMenu(TouchLayout()); if (s_neverOk) { PatchRootMenu(); PatchGameMenu(); if (!getenv("H10_KEEPCONTROLS")) PatchControlsTab(); if (TouchLayout()) TouchLayoutInit(); } }
         if (const char *d = getenv("H10_ITEMS2")) { char mn[64]; int a = 0, b = 0; if (sscanf(d, "%63[^:]:%d:%d", mn, &a, &b) == 3) H10_DumpItems(mn, a, b); }   // despues de cambiar las filas
         if (const char *o = getenv("H10_OPEN")) H10_Open(o);
         if (const char *p = getenv("H10_PILOT")) PilotParse(p);
