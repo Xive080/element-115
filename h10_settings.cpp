@@ -610,6 +610,9 @@ static void CfgRead()
         s_cfg.push_back({ n, v });
     }
     fclose(f); fprintf(stderr, "[H10] config: %zu valores de %s\n", s_cfg.size(), CfgPath().c_str());
+    // OLA 18: un config vacio (sin ninguna linea seta) cuenta como primera ejecucion: perfil de la plataforma y se reescribe. En Android
+    // el shell de adb no puede borrar ficheros de la app en players/ pero si vaciarlos: asi se regenera el de serie sin tocar nada mas.
+    if (s_cfg.empty()) { s_cfgFound = false; fprintf(stderr, "[H10] config: vacio, se regenera con el perfil de serie %d\n", DefQuality()); }
 }
 static const char *CfgGet(const char *n) { for (auto &kv : s_cfg) if (!I_stricmp(kv.first.c_str(), n)) return kv.second.c_str(); return nullptr; }
 // solo se cargan los ajustes de este menu (el fichero lleva todos los dvars archivados, como el original)
