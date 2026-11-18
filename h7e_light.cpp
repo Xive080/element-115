@@ -264,6 +264,7 @@ void H7E_Setup(GfxWorld *w)
 //  - script_model de cliente (spawnflags & 2: G_SpawnScriptModelClientSide los deja fuera del servidor y los crea el cliente): relojes,
 //    pantallas de la caja, lamparas de oficina, luces de portal. Se dibujan rigidos como los smodels con la luz del lightgrid en su origen.
 // Los levelNotify llegan por el '9' de GScr_ClientSysSetState (g_h0ServerCmdHook, encadenado con el del sonido; los mapas NO instalan el suyo).
+// OLA M6: el '@' <id> de ActivateClientExploder/DeactivateClientExploder llega al mapa como sysState("@exploder", "<id>") (id negativo = quitar).
 //   H7E_CLIENT=0 desactiva todo; H7E_CLLIGHTS=0 las luces; H7E_VISION=0 los vision sets; H7E_CLMODELS=0 los modelos.
 //   H7E_POWER=ms (prueba): a ese level.time se dispara el trigger use_elec_switch con el jugador, como si pulsara el interruptor.
 //   H7E_NOTIFY="ms:evento,..." (prueba): levelNotify inyectados (vis1-4, ZPO...).
@@ -348,6 +349,10 @@ void LevelNotify(const std::string &ev, int now)
 void ServerCmd(const client_t *client, const char *cmd)
 {
     if (s_prevHook) s_prevHook(client, cmd);
+    if (client && cmd && cmd[0] == '@' && cmd[1] == ' ') {   // OLA M6: '@' <id> de ActivateClientExploder (id < 0 = Deactivate; CG_SP_ClientExploderCommand)
+        if (const H19MapCl *mc = H19_Map()) if (mc->sysState) mc->sysState("@exploder", cmd + 2, level.time);   // el mapa tiene su createfx
+        return;
+    }
     if (!client || !cmd || cmd[0] != '9' || cmd[1] != ' ') return;
     const int idx = atoi(cmd + 2);
     char cs[1024]; SV_GetConfigstring(idx + 1538, cs, sizeof cs);
