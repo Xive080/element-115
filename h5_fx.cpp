@@ -865,6 +865,16 @@ void H5FX_InstallPre()
 }
 
 // OLA E2a: CG_ShakeCamera sobre los angulos de la vista (h5_play.cpp la llama antes de dibujar): la sacudida de mayor tamano manda
+// OLA E2b: Earthquake() de un script de cliente (CScr_Earthquake -> CG_StartShakeCamera), mismo hueco que EV_EARTHQUAKE
+void H5FX_Earthquake(float scale, float seconds, const float *org, float radius)
+{
+    Shake k{}; k.scale = scale; k.length = seconds * 1000.0f; k.radius = radius; memcpy(k.src, org, 12); k.time = level.time;
+    if (k.scale <= 0 || k.length <= 0 || k.radius <= 0) return;
+    float o[3], a[3]; H4_GetCam(o, a); UpdateShake(k, o, k.time);
+    int i = 0; for (; i < 4; ++i) if (g_shakes[i].time > level.time || (float)level.time >= g_shakes[i].time + g_shakes[i].length) break;
+    if (i == 4) { float mn = k.size; for (int j = 0; j < 4; ++j) if (mn > g_shakes[j].size) { mn = g_shakes[j].size; i = j; } }
+    if (i != 4) g_shakes[i] = k;
+}
 bool H5FX_ShakeCamera(const float *org, float *ang, int time)
 {
     float scale = 0, rumble = 0;

@@ -152,8 +152,10 @@ static void H5E_PlaceNearActor()
 //                            como USAR sobre el trigger (para probar la caja/maquinas sin depender de la posicion exacta)
 //   tpsee TX TY TZ [R]       (OLA E1a) al punto con suelo mas cercano desde el que el ojo ve T a <= R (64), mirandolo
 //   tpsee TARGETNAME [R]     (OLA E1a) igual, con T = centro de los limites de la entidad mas cercana con ese targetname
+//   jump|melee|frag [MS]     (OLA E2b) mantiene salto (bit 10), cuchillo (bit 2) o granada letal (bit 14) MS ms (200/200/300)
 bool g_h5eViewResync = false;
 int g_h5eUseUntil, g_h5eFireUntil; bool g_h5eShotReq;
+int g_h5eBtnUntil[16];   // OLA E2b: jump/melee/frag MS del guion -> bit del usercmd (10 salto, 2 cuchillo, 14 granada)
 namespace {
 struct TimedAct { int t; std::string a; bool done; };
 std::vector<TimedAct> s_timed; bool s_timedInit;
@@ -222,6 +224,9 @@ void H5E_Timed()
             } }
         else if (!strcmp(cmd, "use")) { int ms = 1500; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eUseUntil = level.time + ms; }
         else if (!strcmp(cmd, "fire")) { int ms = 500; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eFireUntil = level.time + ms; }
+        else if (!strcmp(cmd, "jump") || !strcmp(cmd, "melee") || !strcmp(cmd, "frag")) {   // OLA E2b
+            int ms = !strcmp(cmd, "frag") ? 300 : 200; sscanf(ta.a.c_str(), "%*s %d", &ms);
+            g_h5eBtnUntil[cmd[0] == 'j' ? 10 : cmd[0] == 'm' ? 2 : 14] = level.time + ms; }
         else if (!strcmp(cmd, "shot")) g_h5eShotReq = true;
         else if (!strcmp(cmd, "usetn") && pl->r.inuse) {   // OLA S1: usetn TARGETNAME -> el trigger con ese targetname mas cercano recibe "trigger" del jugador
             char tn[96] = ""; sscanf(ta.a.c_str(), "%*s %95s", tn); gentity_s *best = nullptr; float bd = 1e30f;

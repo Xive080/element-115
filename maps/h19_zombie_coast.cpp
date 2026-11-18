@@ -23,20 +23,35 @@
 //  - zombie_coast_amb.csc: salas, reverb y musica los lleva h5_audio_cl (ParseAmb). Aqui: play_poweron_sounds y lighthouse_looper ("LHL"),
 //    indoor_outdoor_transitions (46 blizzard_transitions: amb_blizzard_rand_heavy/light cada 1-1,5 s segun la ventisca) y
 //    snd_play_auto_fx (amb_fire en los fx_fire_line_xsm).
-// No se hace (ver docs): escarcha de pantalla (filtro frost de _filter.csc), FX de electrocutado en zombis/jugador (clientflag de actor),
-// luz y pasos del director, jugador falso de tirolina/lanzador (animaciones de cliente), fxanims del barco (grua y botes), snd_futz del director.
+// OLA E2b (completo):
+//  - escarcha del agua helada (clientflags de jugador 5/6/7: init_frost / frost_invade / frost_retreat): filtro generic_filter_frost
+//    (_filter.csc, pase 0 del filtro 0, destino escena, muestreador escena) con la opacidad que sube y baja como el .csc (H7_FilterPass).
+//  - tirolina (clientflag 0 del jugador): FOV 65 -> 55 en 0,75 s, temblor cada 0,1-0,15 s y vuelta al FOV del usuario 2 s despues.
+//  - electrocutado: jugador (flag 8: rumble), zombis (flag de actor 2: buff_electrified en J_SpineLower).
+//  - director: ciclo de la luz de tag_light (flag 3), pasos fly_step_director_ (flag 4, via H19_AIFootPrepend), FX de muerte (flag 5),
+//    "ZDA" (Earthquake 0,4 / 1,7 s), snd_futz con "dclm"/"dmad". Los FX atornillados a hueso renacen si el actor se teletransporta.
+//  - fxanims (grua y botes): DObj de cliente con el arbol fxanim_props_dlc3, animado en bucle y dibujado con sus huesos (H19_ModelBones).
+// No aplica en solo: jugador falso de la tirolina y del lanzador (flags 1/3/4 solo para los OTROS jugadores). Sin ragdoll de cliente:
+// launch_zombie solo se cuenta.
 //   H19_COAST=0 lo apaga. Pruebas: H19_COAST_NOTIFY="ms:ev,..." inyecta levelNotify de cliente en ese level.time (como el servidor).
 #ifdef H5G
 #include <universal/q_shared.h>
 #include <universal/com_math.h>
 #include <universal/com_math_anglevectors.h>
+#include <universal/dvar.h>
 #include <database/db_registry.h>
 #include <game_mp/g_main_mp.h>
+#include <game_mp/g_utils_mp.h>
 #include <server_mp/server_mp.h>
 #include <EffectsCore/fx_system.h>
 #include <gfx_d3d/r_bsp.h>
 #include <xanim/xmodel.h>
 #include <xanim/xmodel_utils.h>
+#include <xanim/xanim.h>
+#include <xanim/dobj.h>
+#include <xanim/dobj_utils.h>
+#include <xanim/dobj_skel.h>
+#include <EffectsCore/fx_marks.h>
 #include <gfx_d3d/r_model_skin.h>
 #include <clientscript/cscr_stringlist.h>
 #include <qcommon/cm_trace.h>
@@ -68,6 +83,14 @@ GfxWorld *H4_FindWorld();                                                       
 const FxEffectDef *__cdecl FX_Register(char *name);                             // h5_fx.cpp
 extern FxSystemContainer *fx_systemPool;                                        // fx_system.cpp (lo reserva h5_fx)
 FxEffectContainer *__cdecl UniqueHandleToEffect(FxSystem *system, unsigned int handle);   // fx_system.cpp (el handle de FX_PlayOrientedEffect)
+void H7_FilterPass(int f, int p, const char *material, int target, int s0, int s1, bool on) __attribute__((weak));   // h7_gfx.cpp (OLA E2b)
+void H7_FilterConst(int f, int p, int c, float v) __attribute__((weak));
+void H5FX_Earthquake(float scale, float seconds, const float *org, float radius) __attribute__((weak));   // h5_fx.cpp: Earthquake() de cliente
+void H4_GetView(float *org, float (*axis)[3], float *tanHalfX, float *tanHalfY);   // world_h4.cpp
+float H7C_FovX(int W, int H) __attribute__((weak));                                // h7c_gfx.cpp (CG_CalcFov)
+extern float g_h10FovX;                                                            // world_h4.cpp: FOV horizontal en caliente
+int H19_ModelCount(); const char *H19_ModelTn(int j); bool H19_ModelGet(int j, float *org, float *ang);   // h7e_light.cpp (script_model de cliente)
+void H19_ModelBones(int j, const float *mats, int nb) __attribute__((weak));                             // h7e_light.cpp (OLA E2b)
 
 namespace {
 // ===================================================================================================== utilidades
@@ -116,7 +139,8 @@ std::atomic<bool> s_lhl{ false };        // "LHL" visto (sonido del faro)
 std::map<std::string, std::string> s_effect;   // level._effect[clave] -> ruta de LoadFx (zombie_coast_fx.csc)
 void ParseEffects()
 {
-    const std::string t = Raw("clientscripts/zombie_coast_fx.csc"), l = Lower(t);
+    for (const char *file : { "clientscripts/zombie_coast_fx.csc", "clientscripts/_zombiemode_ai_director.csc" }) {   // OLA E2b: + init() del director
+    const std::string t = Raw(file), l = Lower(t);
     size_t p = 0;
     while ((p = l.find("level._effect[", p)) != std::string::npos) {
         std::string key, path; size_t e = 0;
@@ -124,7 +148,8 @@ void ParseEffects()
         size_t lf = l.find("loadfx", e), nl = t.find('\n', e);
         p = e;
         if (lf == std::string::npos || (nl != std::string::npos && lf > nl)) continue;
-        if (Quoted(t, lf, path)) s_effect[key] = path;
+        if (Quoted(t, lf, path) && !s_effect.count(key)) s_effect[key] = path;
+    }
     }
 }
 int s_fxT0 = -1, s_fxPlayed, s_fxMissing;   // s_fxT0 >= 0: FxSystem en marcha (FX_SpawnEffect antes del primer frame de h5_fx cae, M3)
@@ -440,6 +465,257 @@ void Flares()   // flare_effects: PlayFXOnTag(flare | flare_no_dlight, coast_fla
     fprintf(stderr, "[H19] Coast: %d bengalas (coast_flare)\n", s_flares);
 }
 
+// ===================================================================================================== OLA E2b: escarcha del agua helada
+// zombie_coast.csc: clientflags del JUGADOR (ps.eFlags2) 5 = _CF_PLAYER_WATER_FROST (coast_water_frost: con 1 coast_water_frost_invade,
+// con 0 coast_water_frost_retreat), 6 = _CF_PLAYER_WATER_FREEZE (coast_water_freeze: al quitarse, al jugador local _frost_curr_time = 0;
+// el FX waterfreeze y el freezegun_shatter son solo para los OTROS jugadores) y 7 = _CF_PLAYER_WATER_FROST_REMOVE (quita el filtro).
+// El filtro es el de _filter.csc: init_filter_frost / enable_filter_frost = set_filter_pass_material(0, 0, generic_filter_frost,
+// targerid_scene 3, targerid_scene 3, targetid_none 0) + set_filter_pass_enabled; set_filter_frost_opacity = set_filter_pass_constant(0, 0, 0, op).
+// invade: opacidad = _frost_curr_time / 30000 (de 0 a 1) cada 0,1 s sumando el tiempo real; retreat: espera 0,5 s y resta hasta <= 0.
+const float kFrostMax = 30000.0f;
+float s_frostOp, s_frostCur; int s_frostMode, s_frostAt, s_frostLast; bool s_frostFirst;   // modo 0 nada, 1 invade, 2 retreat
+unsigned s_plFlags; bool s_plFlagsInit;
+int s_frostSets, s_freezeSets, s_frostRemoves, s_elecSets;
+void FrostFilter(bool on, float op)
+{
+    if (!H7_FilterPass || !H7_FilterConst) return;
+    if (on) { H7_FilterPass(0, 0, "generic_filter_frost", 3, 3, 0, true); H7_FilterConst(0, 0, 0, op); }
+    else H7_FilterPass(0, 0, nullptr, 0, 0, 0, false);
+}
+void FrostInvade(int now)   // coast_water_frost_invade
+{
+    if (s_frostOp > 0) s_frostCur = s_frostOp * kFrostMax;
+    FrostFilter(true, s_frostOp);
+    s_frostMode = 1; s_frostAt = now; s_frostFirst = true;
+}
+void FrostFrame(int now)
+{
+    if (!s_frostMode || now < s_frostAt) return;
+    const float diff = s_frostFirst ? 0.0f : (float)(now - s_frostLast);   // diff = nextTime - startTime (0 la primera vuelta)
+    s_frostFirst = false; s_frostLast = now; s_frostAt = now + 100;   // wait(0.1)
+    if (s_frostMode == 1) {
+        s_frostOp = fminf(1.0f, fmaxf(0.0f, s_frostCur / kFrostMax)); s_frostCur += diff;
+        if (H7_FilterConst) H7_FilterConst(0, 0, 0, s_frostOp);
+        static int lastLog = -1; const int pct = (int)(s_frostOp * 10.0f);
+        if (pct != lastLog) { lastLog = pct; fprintf(stderr, "[H19] Coast: escarcha subiendo, opacidad %.2f t=%d\n", s_frostOp, now); }
+    } else {
+        if (s_frostOp <= 0) { FrostFilter(false, 0); s_frostMode = 0; fprintf(stderr, "[H19] Coast: escarcha quitada t=%d\n", now); return; }
+        s_frostOp = s_frostCur / kFrostMax; s_frostCur -= diff;
+        if (H7_FilterConst) H7_FilterConst(0, 0, 0, s_frostOp);
+        if (s_frostOp <= 0) { FrostFilter(false, 0); s_frostMode = 0; fprintf(stderr, "[H19] Coast: escarcha quitada t=%d\n", now); }
+    }
+}
+// ---- jugador: zipline_rumble_and_quake (clientflag 0) y electrocutado (8)
+float s_fovFrom, s_fovTo, s_fovUser = -1; int s_fovT0 = -1, s_fovDur; int s_zipQuakeAt = -1, s_zipEndAt = -1;
+void SetFov(float fov)   // SetClientDvar("cg_fov", v) + el FOV horizontal del render (CG_CalcFov)
+{
+    if (const dvar_s *d = Dvar_FindVar("cg_fov")) { char b[16]; snprintf(b, sizeof b, "%g", fov); Dvar_SetFromStringByName("cg_fov", b); (void)d; }
+    if (!H7C_FovX) return;
+    float o[3], ax[3][3], tx, ty; H4_GetView(o, ax, &tx, &ty);
+    if (tx > 0 && ty > 0) g_h10FovX = H7C_FovX((int)(1000.0f * tx / ty), 1000);
+}
+void LerpFov(float from, float to, float sec, int now) { s_fovFrom = from; s_fovTo = to; s_fovT0 = now; s_fovDur = (int)(sec * 1000.0f); }   // lerp_fov(.75, base, dest)
+void FovFrame(int now)
+{
+    if (s_fovT0 < 0) return;
+    const int incs = s_fovDur / 50; if (incs <= 0) { s_fovT0 = -1; return; }   // incs = int(time / .05), un paso cada 0,05 s
+    const int k = (now - s_fovT0) / 50 + 1;
+    if (k >= incs) { SetFov(s_fovTo); s_fovT0 = -1; return; }
+    SetFov(s_fovFrom + (s_fovTo - s_fovFrom) / incs * k);
+}
+void PlayerFlagsFrame(int now)
+{
+    gentity_s *pl = &g_entities[0]; if (!pl->r.inuse || !pl->client) return;
+    const unsigned f = (unsigned)pl->client->ps.eFlags2 & ((1u << 0) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8));
+    if (!s_plFlagsInit) { s_plFlagsInit = true; s_plFlags = 0; FrostFilter(false, 0); }   // coast_reset_frost al conectar
+    const unsigned ch = f ^ s_plFlags; s_plFlags = f;
+    if (ch & (1u << 5)) {   // coast_water_frost
+        if (f & (1u << 5)) { ++s_frostSets; FrostInvade(now); fprintf(stderr, "[H19] Coast: agua helada: escarcha (frost_invade) t=%d\n", now); }
+        else { s_frostMode = 2; s_frostAt = now + 500; s_frostFirst = true; fprintf(stderr, "[H19] Coast: fuera del agua: la escarcha se retira (frost_retreat) t=%d\n", now); }
+    }
+    if (ch & (1u << 6)) {   // coast_water_freeze (jugador local)
+        if (f & (1u << 6)) { ++s_freezeSets; fprintf(stderr, "[H19] Coast: jugador congelado (water_freeze) t=%d\n", now); }
+        else { s_frostCur = 0; fprintf(stderr, "[H19] Coast: fin de la congelacion: _frost_curr_time = 0 t=%d\n", now); }
+    }
+    if ((ch & (1u << 7)) && (f & (1u << 7))) { ++s_frostRemoves; s_frostMode = 0; s_frostOp = 0; FrostFilter(false, 0); fprintf(stderr, "[H19] Coast: escarcha quitada a la fuerza (frost_remove) t=%d\n", now); }
+    if ((ch & (1u << 8)) && (f & (1u << 8))) { ++s_elecSets; fprintf(stderr, "[H19] Coast: jugador electrocutado (PlayRumbleOnEntity explosion_generic) t=%d\n", now); }
+    if (ch & 1u) {   // zipline_rumble_and_quake: do_zipline_fx / stop_zipline_fx
+        if (f & 1u) {
+            if (s_fovUser < 0) { const dvar_s *d = Dvar_FindVar("cg_fov"); s_fovUser = d ? d->current.value : 65.0f; }
+            LerpFov(65.0f, 55.0f, 0.75f, now); s_zipQuakeAt = now; s_zipEndAt = -1;   // lerp_fov(.75, default_fov 65, zipline_fov 55)
+            fprintf(stderr, "[H19] Coast: tirolina: FOV 65 -> 55 y temblor t=%d\n", now);
+        } else { s_zipQuakeAt = -1; s_zipEndAt = now + 2000; fprintf(stderr, "[H19] Coast: fin de la tirolina t=%d\n", now); }   // wait(2) y lerp de vuelta
+    }
+    if (s_zipQuakeAt >= 0 && now >= s_zipQuakeAt) {   // Earthquake(RandomFloatRange(.15, .22), RandomFloatRange(.15, .22), origin, 100); wait(.1-.15)
+        if (H5FX_Earthquake) H5FX_Earthquake(RandRange(0.15f, 0.22f), RandRange(0.15f, 0.22f), pl->r.currentOrigin, 100.0f);
+        s_zipQuakeAt = now + (int)(RandRange(0.1f, 0.15f) * 1000.0f);
+    }
+    if (s_zipEndAt >= 0 && now >= s_zipEndAt) { s_zipEndAt = -1; LerpFov(55.0f, s_fovUser > 0 ? s_fovUser : 65.0f, 0.75f, now); }   // vuelta (65 en el original)
+}
+
+// ===================================================================================================== OLA E2b: clientflags de actor
+// register_clientflag_callback("actor", ...) de zombie_coast.csc (bits de s.lerp.eFlags2):
+//   2 coast_zombie_electrified: buff_electrified en J_SpineLower mientras este puesto (zombis buffados por el director);
+//   3 zombie_director_light_update (_zombiemode_ai_director.csc): CADA cambio pasa health_state pristine -> health_full -> damage_one ->
+//     damage_two -> (sin definir) y vuelve a lanzar en tag_light docile / light_big / light / light_blink (con "sin definir" repite el ultimo);
+//   4 director_footsteps: self.footstepPrepend = "fly_step_director_" (lo usa _footsteps.csc playAIFootstep, h5_audio_cl);
+//   5 zombie_director_death: director_death_head en j_neck y director_death_torso en J_SpineLower (al quitarse, se borran);
+//   0 launch_zombie (zombie_coast_flinger.csc): LaunchRagdoll; el arnes no tiene ragdoll de cliente: solo se cuenta.
+struct JointFx { std::string tag, key; unsigned h; const FxEffectDef *def; float last[3]; };
+struct ActorSt { int use; unsigned fl; int lightState; std::vector<JointFx> elec, light, death; };
+std::map<int, ActorSt> s_act;
+std::atomic<int> s_dirSteps[1024];   // useCount + 1 de los actores con director_footsteps (lo lee el hilo de sonido)
+int s_elecZombies, s_lightFlips, s_deathFx, s_ragdolls;
+bool TagMatrix(gentity_s *e, const char *tag, float m[4][3])
+{
+    const unsigned t = SL_FindLowercaseString(tag, SCRIPTINSTANCE_SERVER);
+    if (t && G_DObjGetWorldTagMatrix(e, t, m)) return true;
+    AnglesToAxis(e->r.currentAngles, m); memcpy(m[3], e->r.currentOrigin, 12); return false;
+}
+void TagFx(gentity_s *e, std::vector<JointFx> &v, const char *tag, const char *key)   // PlayFXOnTag(fx, self, tag)
+{
+    JointFx f; f.tag = tag; f.key = key; f.h = 0; f.def = nullptr;
+    float m[4][3]; const bool ok = TagMatrix(e, tag, m); memcpy(f.last, m[3], 12);
+    if (const char *p = EffectPath(key)) { f.h = H19_PlayFx(p, m[3], m[0], m[2]);
+#ifdef H5FX
+        f.def = FX_Register((char *)p);
+#endif
+    }
+    static int logs; if (logs++ < 12) fprintf(stderr, "[H19] Coast: FX %s en %s del ent %d (%s) %s\n", key, tag, e->s.number, ok ? "hueso" : "sin hueso: origen", f.h ? "ok" : "NO");
+    v.push_back(f);
+}
+void KillTagFx(std::vector<JointFx> &v) { for (JointFx &f : v) H19_KillFx(f.h); v.clear(); }
+void FollowTagFx(gentity_s *e, std::vector<JointFx> &v)   // el ent de FX atornillado al hueso: frameNow = matriz del hueso (FX_UpdateEffectBolt)
+{
+#ifdef H5FX
+    if (!fx_systemPool) return;
+    for (JointFx &f : v) {
+        if (!f.h || !f.def) continue;
+        FxEffectContainer *c = UniqueHandleToEffect(&FX_GetSystem(0)->system, f.h);
+        if (!c || c->effect.def != f.def) { f.h = 0; continue; }
+        float m[4][3]; TagMatrix(e, f.tag.c_str(), m); float ax[3][3]; memcpy(ax, m, sizeof ax);
+        const float dx = m[3][0] - f.last[0], dy = m[3][1] - f.last[1], dz = m[3][2] - f.last[2], d2 = dx * dx + dy * dy + dz * dz;
+        if (!(d2 < 1e30f)) continue;   // NaN o infinito: no se mueve
+        if (d2 > 256.0f * 256.0f) {   // teletransporte (el director sale del agua por otro sitio): como un ent nuevo, el FX vuelve a nacer
+            H19_KillFx(f.h); f.h = 0;   // un rastro (trail) que salta miles de unidades en un frame genera elementos sin fin
+            if (const char *p = EffectPath(f.key.c_str())) f.h = H19_PlayFx(p, m[3], m[0], m[2]);
+            memcpy(f.last, m[3], 12); continue;
+        }
+        memcpy(f.last, m[3], 12);
+        memcpy(c->effect.frameNow.origin, m[3], 12); AxisToQuat(ax, c->effect.frameNow.quat);
+    }
+#else
+    (void)e; (void)v;
+#endif
+}
+void ActorsFrame(int now)
+{
+    std::map<int, bool> alive;
+    for (int n = 0; n < level.num_entities && n < 1024; ++n) {
+        gentity_s *e = &g_entities[n];
+        if (!e->r.inuse || e->s.eType != ET_ACTOR) continue;
+        const unsigned fl = (unsigned)e->s.lerp.eFlags2 & 0x3Du;   // bits 0, 2, 3, 4, 5
+        auto it = s_act.find(n);
+        if (it != s_act.end() && it->second.use != e->s.lerp.useCount) { KillTagFx(it->second.elec); KillTagFx(it->second.light); KillTagFx(it->second.death); s_act.erase(it); it = s_act.end(); }
+        if (it == s_act.end()) { if (!fl) continue; ActorSt a; a.use = e->s.lerp.useCount; a.fl = 0; a.lightState = -1; it = s_act.emplace(n, a).first; }
+        ActorSt &a = it->second; alive[n] = true;
+        const unsigned ch = fl ^ a.fl; a.fl = fl;
+        if (ch & (1u << 2)) {   // coast_zombie_electrified
+            KillTagFx(a.elec);
+            if (fl & (1u << 2)) { TagFx(e, a.elec, "j_spinelower", "buff_electrified"); ++s_elecZombies; }
+        }
+        if (ch & (1u << 3)) {   // zombie_director_light_update: un paso por cada cambio de la bandera
+            static const char *const kFx[5] = { "director_weapon_docile", "director_weapon_light_big", "director_weapon_light", "director_weapon_light_blink", "director_weapon_light_blink" };
+            static const char *const kSt[5] = { "pristine", "health_full", "health_damage_one", "health_damage_two", "(sin definir)" };
+            a.lightState = (a.lightState + 1) % 5; ++s_lightFlips;
+            KillTagFx(a.light); TagFx(e, a.light, "tag_light", kFx[a.lightState]);
+            fprintf(stderr, "[H19] Coast: luz del director (ent %d): %s -> %s t=%d\n", n, kSt[a.lightState], kFx[a.lightState], now);
+        }
+        if ((ch & (1u << 4)) && (fl & (1u << 4))) { s_dirSteps[n] = e->s.lerp.useCount + 1; fprintf(stderr, "[H19] Coast: pasos del director (fly_step_director_) ent %d\n", n); }
+        if (ch & (1u << 5)) {   // zombie_director_death
+            KillTagFx(a.death);
+            if (fl & (1u << 5)) { TagFx(e, a.death, "j_neck", "director_death_head"); TagFx(e, a.death, "j_spinelower", "director_death_torso"); ++s_deathFx;
+                fprintf(stderr, "[H19] Coast: el director cae (director_death) ent %d t=%d\n", n, now); }
+        }
+        if ((ch & 1u) && (fl & 1u)) { ++s_ragdolls; fprintf(stderr, "[H19] Coast: zombi lanzado por el flinger (launch_zombie, sin ragdoll) ent %d t=%d\n", n, now); }
+        FollowTagFx(e, a.elec); FollowTagFx(e, a.light); FollowTagFx(e, a.death);
+    }
+    for (auto it = s_act.begin(); it != s_act.end();) {   // entityshutdown: los FX atornillados se van con el
+        if (alive.count(it->first)) { ++it; continue; }
+        KillTagFx(it->second.elec); KillTagFx(it->second.light); KillTagFx(it->second.death); it = s_act.erase(it);
+    }
+}
+
+// ===================================================================================================== OLA E2b: fxanims (grua y botes)
+// setup_fx_anims / fxanim_init / fxanim_think (zombie_coast.csc): los script_model de cliente con targetname "fxanim" y script_noteworthy
+// hook_anim / boat_anim hacen UseAnimTree(fxanim_props_dlc3) y, tras RandomFloatRange(1, 2) s, SetAnim(level.fxanims[nombre], 1, 0, speed 1)
+// (los nombres de animacion se leen de level.fxanims[...] = %... del rawfile). Sin VM de CSC: un DObj propio con un arbol root -> anim,
+// XAnimSetCompleteGoalWeight como SetAnim, DObjUpdateClientInfo con el tiempo del frame y DObjCalcSkel; la pose va a h7e
+// (H19_ModelBones) como base pose inversa * hueso * entidad. H19_COAST_FXANIM=0 los deja quietos.
+struct FxAnimObj { int j; std::string anim; XModel *xm; XAnim_s *anims; XAnimTree_s *tree; DObj *obj; DObjAnimMat *skel; int startAt, last; bool on; float org[3], ang[3]; };
+std::vector<FxAnimObj> s_fxa; bool s_fxaInit; int s_fxaTs = 1, s_fxaFrames;
+void *FxaAlloc(unsigned n) { return calloc(1, n); }
+void FxAnimInit(int now)
+{
+    s_fxaInit = true;
+    if (!H19_ModelBones || !H19_EnvOn("H19_COAST_FXANIM")) return;
+    std::map<std::string, std::string> names;   // fxanim_init: level.fxanims["hook_anim"] = %fxanim_zom_ship_crane01_hook_anim; ...
+    { const std::string t = Raw("clientscripts/zombie_coast.csc"); size_t p = 0;
+      while ((p = t.find("level.fxanims[", p)) != std::string::npos) { std::string k; size_t e = 0; if (!Quoted(t, p, k, &e)) break; p = e;
+          size_t pc = t.find('%', e), sc = t.find(';', e); if (pc == std::string::npos || sc == std::string::npos || pc > sc) continue;
+          std::string a = t.substr(pc + 1, sc - pc - 1); while (!a.empty() && isspace((unsigned char)a.back())) a.pop_back(); names[k] = a; } }
+    for (const H19Kv &k : H19_MapEnts()) {
+        const char *tn = H19_Str(k, "targetname"), *nw = H19_Str(k, "script_noteworthy"), *mn = H19_Str(k, "model");
+        if (!tn || strcmp(tn, "fxanim") || !nw || !mn || !names.count(nw)) continue;   // fxanim_think: sin nombre o desconocido, nada
+        float org[3] = { 0, 0, 0 }, ang[3] = { 0, 0, 0 }; H19_Vec(k, "origin", org); H19_Vec(k, "angles", ang);
+        int j = -1; for (int i = 0; i < H19_ModelCount(); ++i) { float o[3]; const char *mt = H19_ModelTn(i);
+            if (mt && !strcmp(mt, "fxanim") && H19_ModelGet(i, o, nullptr) && fabsf(o[0] - org[0]) + fabsf(o[1] - org[1]) + fabsf(o[2] - org[2]) < 0.5f) { j = i; break; } }
+        XModel *xm = DB_FindXAssetHeader(ASSET_TYPE_XMODEL, (char *)mn, 1, -1).model;
+        if (j < 0 || !xm || XModelNumBones(xm) > 128) { fprintf(stderr, "[H19] Coast: fxanim %s sin modelo de cliente\n", mn); continue; }
+        FxAnimObj f{}; f.j = j; f.anim = names[nw]; f.xm = xm; memcpy(f.org, org, 12); memcpy(f.ang, ang, 12);
+        f.anims = XAnimCreateAnims("coast_fxanim", 2, FxaAlloc);
+        XAnimBlend(f.anims, 0, "root", 1, 1, 0);
+        XAnimCreate(f.anims, 1, (char *)f.anim.c_str());
+        if (!f.anims->entries[1].parts) { fprintf(stderr, "[H19] Coast: fxanim: animacion %s no esta\n", f.anim.c_str()); continue; }
+        f.tree = XAnimCreateTree(f.anims, FxaAlloc);
+        DObjModel_s dm; memset(&dm, 0, sizeof dm); dm.model = xm;
+        f.obj = (DObj *)calloc(1, sizeof(DObj));
+        DObjCreateExt(&dm, 1, f.tree, (unsigned char *)f.obj, 1023, true, false, 0);
+        if (posix_memalign((void **)&f.skel, 16, DObjGetAllocSkelSize(f.obj) + 64)) continue;
+        f.startAt = now + (int)(RandRange(1.0f, 2.0f) * 1000.0f); f.last = now;   // wait(RandomFloatRange(1, 2))
+        s_fxa.push_back(f);
+        fprintf(stderr, "[H19] Coast: fxanim %s (%s) en %.0f %.0f %.0f: %d huesos, %.2f s\n", mn, f.anim.c_str(), org[0], org[1], org[2], XModelNumBones(xm),
+            (float)XAnimGetLength(f.anims, 1));
+    }
+}
+void FxAnimFrame(int now)
+{
+    if (!s_fxaInit) FxAnimInit(now);
+    if (s_fxa.empty()) return;
+    static DObjSkelMat *out; if (!out && posix_memalign((void **)&out, 16, 128 * sizeof(DObjSkelMat))) return;
+    ++s_fxaTs;
+    for (FxAnimObj &f : s_fxa) {
+        if (!f.on) { if (now < f.startAt) continue;
+            XAnimSetCompleteGoalWeight(f.obj, 1, 1.0f, 0.0f, 1.0f, 0, 0, 0, 0); f.on = true; f.last = now; }   // SetAnim(anim, 1.0, 0.0, speed)
+        const float dt = (float)(now - f.last) * 0.001f; f.last = now;
+        if (dt > 0) DObjUpdateClientInfo(f.obj, dt, 0);
+        if (!DObjSkelExists(f.obj, s_fxaTs)) DObjCreateSkel(f.obj, (char *)f.skel, s_fxaTs);
+        int bits[5] = { -1, -1, -1, -1, -1 }; DObjCalcSkel(f.obj, bits);
+        const DObjAnimMat *mats = DObjGetRotTransArray(f.obj); if (!mats) continue;
+        const int nb = XModelNumBones(f.xm); const DObjAnimMat *base = XModelGetBasePose(f.xm);
+        DObjSkelMat ent; memset(&ent, 0, sizeof ent); float ax[3][3]; AnglesToAxis(f.ang, ax);
+        for (int a = 0; a < 3; ++a) for (int c = 0; c < 3; ++c) ent.axis[a][c] = ax[a][c];
+        memcpy(ent.origin, f.org, 12); ent.origin[3] = 1.0f;
+        for (int b = 0; b < nb; ++b) {
+            DObjSkelMat inv, bone, bw; ConvertQuatToInverseSkelMat(&base[b], &inv); ConvertQuatToSkelMat(&mats[b], &bone);
+            R_MultiplySkelMat(&inv, &bone, &bw); R_MultiplySkelMat(&bw, &ent, &out[b]);
+            out[b].axis[0][3] = out[b].axis[1][3] = out[b].axis[2][3] = 0.0f; out[b].origin[3] = 1.0f;
+        }
+        H19_ModelBones(f.j, (const float *)out, nb);
+    }
+    if (++s_fxaFrames == 200) fprintf(stderr, "[H19] Coast: %zu fxanims animados\n", s_fxa.size());
+}
+
 // ===================================================================================================== avisos del servidor
 std::mutex s_evMu; std::vector<std::pair<std::string, std::string>> s_evQ;   // (sistema, estado); sistema "" = levelNotify
 bool s_power;
@@ -466,6 +742,14 @@ void Notify(const std::string &ev, int now)
     else if (ev == "FO") VisApply("zombie_coast_lighthouse", 2, 5.0f, false);
     else if (ev == "lmc" && !s_morseOn) { s_morseOn = true; s_mAt = now; fprintf(stderr, "[H19] Coast: codigo Morse del faro (lmc)\n"); }
     else if (ev == "slc") { s_morseOn = false; H19_KillFx(s_mFx); fprintf(stderr, "[H19] Coast: fin del Morse (slc)\n"); }
+    else if (ev == "ZDA") {   // zombie_director_aggro: PlayRumbleOnPosition + Earthquake(0.4, 1.7, player.origin, 1000)
+        if (H5FX_Earthquake) H5FX_Earthquake(0.4f, 1.7f, g_entities[0].r.currentOrigin, 1000.0f);
+        fprintf(stderr, "[H19] Coast: el director se enfada (ZDA): temblor 0,4 / 1,7 s%s t=%d\n", H5FX_Earthquake ? "" : " (sin H5FX_Earthquake)", now);
+    }
+    else if (ev == "dclm" || ev == "dmad") {   // zombie_coast_amb.csc director_futz_change_on/off: setdvarfloat("snd_futz", 0 / 1)
+        Dvar_SetFloatByName("snd_futz", ev == "dmad" ? 1.0f : 0.0f);
+        fprintf(stderr, "[H19] Coast: snd_futz %d (%s) t=%d\n", ev == "dmad", ev.c_str(), now);
+    }
 }
 
 void Init(const std::vector<H19Kv> &)
@@ -512,6 +796,17 @@ void Frame(int now)
     LighthouseFrame(now);
     MorseFrame(now);
     RainFrame(now);
+    PlayerFlagsFrame(now);   // OLA E2b: escarcha, tirolina, electrocutado
+    FrostFrame(now);
+    FovFrame(now);
+    if (s_fxT0 >= 0) ActorsFrame(now);   // OLA E2b: clientflags de actor (director, zombis electrificados, flinger)
+    FxAnimFrame(now);        // OLA E2b: fxanims de la grua y los botes
+    {   // resumen periodico
+        static int next = 60000;
+        if (now >= next) { next = now + 60000;
+            fprintf(stderr, "[H19] Coast E2b: escarcha %d (congelado %d, quitada %d, opacidad %.2f), electrocutado %d, zombis electrificados %d, luz del director %d, muerte del director %d, lanzados %d\n",
+                s_frostSets, s_freezeSets, s_frostRemoves, s_frostOp, s_elecSets, s_elecZombies, s_lightFlips, s_deathFx, s_ragdolls); }
+    }
 }
 const char *LevelEffect(const char *key) { auto it = s_effect.find(key); return it == s_effect.end() ? nullptr : it->second.c_str(); }
 
@@ -565,6 +860,15 @@ void AudioStatus(std::string &out)
 }
 #endif
 } // namespace
+
+// OLA E2b: director_footsteps (self.footstepPrepend) para h5_audio_cl PlayAIFootstep; solo en Call of the Dead
+const char *H19_AIFootPrepend(int entnum)
+{
+    if (entnum < 0 || entnum >= 1024 || !s_dirSteps[entnum]) return nullptr;
+    const H19MapCl *mc = H19_Map(); if (!mc || strcmp(mc->zone, "zombie_coast")) return nullptr;
+    if (s_dirSteps[entnum] != g_entities[entnum].s.lerp.useCount + 1) return nullptr;   // otra entidad en el mismo numero
+    return "fly_step_director_";
+}
 
 extern const H19MapCl kH19_zombie_coast = {
     .zone = "zombie_coast", .offEnv = "H19_COAST",

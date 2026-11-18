@@ -150,6 +150,7 @@ static void H5P_CmdButtons(client_t *bot, usercmd_s *cmd)
     for (unsigned b : list) if (held & b) cmd->button_bits.setBit((unsigned)H5P_UsercmdBit(b));
     { extern int g_h5eUseUntil, g_h5eFireUntil; if (level.time < g_h5eUseUntil) cmd->button_bits.setBit((unsigned)H5P_UsercmdBit(H5IN_USE));   // OLA M1: H5_TIMED
       if (level.time < g_h5eFireUntil) cmd->button_bits.setBit((unsigned)H5P_UsercmdBit(H5IN_FIRE)); }
+    { extern int g_h5eBtnUntil[16]; for (unsigned b = 0; b < 16; ++b) if (level.time < g_h5eBtnUntil[b]) cmd->button_bits.setBit(b); }   // OLA E2b: jump/melee/frag
     // arma (cgameUserCmdWeapon): un SwitchToWeapon de script llega a un cliente de prueba como peticion de bot (SV_BotSwitchWeapon ->
     // botInfos[].weapon, lo que usa Bot_UpdateWeapon); la eleccion del jugador (weapnext / peticion directa) va despues y manda.
     const int req = botInfos[pl->s.number].weapon;

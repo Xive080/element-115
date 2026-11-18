@@ -286,6 +286,67 @@ bool H7_VisionSetNaked(const char *name, float seconds)
     fprintf(stderr, "[H7E] VisionSetNaked %s (%.1f s): %d dvars\n", name, seconds, n);
     return true;
 }
+// ---- OLA E2b: filtros genericos del script de cliente (_filter.csc: map_material + set_filter_pass_material / _enabled / _constant ->
+// cg.genericFilterPass* (CScr_Set_Filter_Pass_*, cg_scr_main.cpp) -> refdef.genericFilter (CG_View) -> RB_GenericFilterFX tras
+// RB_BloomLDR, como RB_ProcessPostEffects). Lo usa la escarcha de Call of the Dead (generic_filter_frost). H7_FILTER=0 los apaga.
+#include <gfx_d3d/rb_postfx.h>
+static GfxGenericFilter s_gfilter; static bool s_gfilterAny;
+static int EnsureShaders(Material *m);
+void H7_FilterPass(int f, int p, const char *material, int target, int s0, int s1, bool on)   // set_filter_pass_material + _enabled
+{
+    if (f < 0 || f > 2 || p < 0 || p > 15) return;
+    if (material) {
+        Material *m = Material_RegisterHandle((char *)material, 3);
+        if (m) { const int made = EnsureShaders(m); if (made) fprintf(stderr, "[H7] filtro %s: %d shaders creados\n", material, made); }
+        else fprintf(stderr, "[H7] filtro: material %s no esta\n", material);
+        s_gfilter.passMaterial[f][p] = m; s_gfilter.passTarget[f][p] = target; s_gfilter.passSampler0[f][p] = s0; s_gfilter.passSampler1[f][p] = s1;
+    }
+    s_gfilter.passEnabled[f][p] = on;
+    s_gfilterAny = false; for (int i = 0; i < 3; ++i) for (int j = 0; j < 16; ++j) s_gfilterAny |= s_gfilter.passEnabled[i][j] && s_gfilter.passMaterial[i][j];
+}
+void H7_FilterConst(int f, int p, int c, float v) { if (f >= 0 && f <= 2 && p >= 0 && p <= 15 && c >= 0 && c <= 15) s_gfilter.passParam[f][p][c] = v; }   // set_filter_pass_constant
+// Pases de pantalla completa (passQuads <= 0) de RB_GenericFilterFX con la misma tabla de destinos/muestreadores. El cuerpo
+// decompilado de zdec guarda punteros en int de 32 bits (iPass[72]) y revienta en arm64; los pases con quads (superflare) no se usan aqui.
+void R_DirtyCodeConstant(GfxCmdBufSourceState *source, CodeConstant constant);
+static void SetConst(CodeConstant c, float x, float y, float z, float w)
+{
+    float *v = gfxCmdBufSourceState.input.consts[c]; v[0] = x; v[1] = y; v[2] = z; v[3] = w;
+    R_DirtyCodeConstant(&gfxCmdBufSourceState, c);
+}
+static void GenericFilterPasses(const GfxViewInfo *vi)
+{
+    static const GfxRenderTargetId kTarget[5] = { R_RENDERTARGET_NONE, R_RENDERTARGET_POST_EFFECT_0, R_RENDERTARGET_POST_EFFECT_1, R_RENDERTARGET_SCENE, R_RENDERTARGET_NONE };
+    static const unsigned char kResolve[5] = { 0, 12, 13, 3, 0 }, kBind[5] = { 0, 12, 13, 6, 5 };   // sampler 1..4 -> (fuente a resolver, imagen ligada)
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 16; ++j) {
+        const GfxGenericFilter &g = s_gfilter;
+        Material *m = g.passMaterial[i][j];
+        if (!g.passEnabled[i][j] || !m || g.passQuads[i][j] > 0) continue;
+        const int t = g.passTarget[i][j], s0 = g.passSampler0[i][j], s1 = g.passSampler1[i][j];
+        if (t < 1 || t > 3) continue;
+        const GfxRenderTargetId rt = kTarget[t];
+        const int r0 = (s0 >= 1 && s0 <= 4) ? kResolve[s0] : 0, r1 = (s1 >= 1 && s1 <= 4) ? kResolve[s1] : 0;
+        for (int r : { 12, 13 }) if (r0 == r || r1 == r) {
+            R_SetRenderTargetSize(&gfxCmdBufSourceState, (GfxRenderTargetId)r); R_SetRenderTarget(gfxCmdBufContext, (GfxRenderTargetId)r);
+            R_Resolve(gfxCmdBufContext, gfxRenderTargets[r].image);
+        }
+        if (r0 == 3 || r1 == 3) {   // StretchRect(escena -> RESOLVED_SCENE)
+            R_SetRenderTargetSize(&gfxCmdBufSourceState, R_RENDERTARGET_SCENE); R_SetRenderTarget(gfxCmdBufContext, R_RENDERTARGET_SCENE);
+            R_Resolve(gfxCmdBufContext, gfxRenderTargets[R_RENDERTARGET_RESOLVED_SCENE].image);
+        }
+        if (s0 >= 1 && s0 <= 4) R_SetCodeImageTexture(&gfxCmdBufSourceState, 0xDu, gfxRenderTargets[kBind[s0]].image);
+        if (s1 >= 1 && s1 <= 4) R_SetCodeImageTexture(&gfxCmdBufSourceState, 0xEu, gfxRenderTargets[kBind[s1]].image);
+        R_SetRenderTargetSize(&gfxCmdBufSourceState, rt); R_SetRenderTarget(gfxCmdBufContext, rt);
+        const float *p = g.passParam[i][j];
+        SetConst(CONST_SRC_CODE_GENERIC_PARAM0, p[0], p[1], p[2], p[3]);
+        SetConst(CONST_SRC_CODE_GENERIC_PARAM1, p[4], p[5], p[6], p[7]);
+        SetConst(CONST_SRC_CODE_GENERIC_PARAM2, p[8], p[9], p[10], p[11]);
+        SetConst(CONST_SRC_CODE_GENERIC_PARAM3, p[12], p[13], (float)gfxRenderTargets[rt].width, (float)gfxRenderTargets[rt].height);
+        SetConst(CONST_SRC_CODE_EYEOFFSET, vi->cullViewInfo.viewParms.origin[0], vi->cullViewInfo.viewParms.origin[1], vi->cullViewInfo.viewParms.origin[2], 0.0f);
+        R_Set2D(&gfxCmdBufSourceState);
+        RB_Filter(m, vi);
+        if (tess.indexCount) RB_EndTessSurface();
+    }
+}
 // Llamado al final de la escena 3D (world_h4 RenderFrame, tras actores/arma/efectos) con el render target FRAME_BUFFER (= SCENE) activo
 bool g_h10PostFxOff;   // OLA 10: "BLOOM / POST FX" del menu de ajustes (en caliente)
 void H7_PostFX()
@@ -302,6 +363,12 @@ void H7_PostFX()
     H7_VisionTick();
     RB_BloomLDR(s_pvi);
     if (tess.indexCount) RB_EndTessSurface();
+    static const bool filterOn = !(getenv("H7_FILTER") && !atoi(getenv("H7_FILTER")));
+    if (s_gfilterAny && filterOn) {   // OLA E2b: RB_UsingGenericFilter -> RB_GenericFilterFX (pases del CSC)
+        memcpy(&s_pvi->genericFilter, &s_gfilter, sizeof s_gfilter);
+        gfxCmdBufContext.state->renderTargetId = R_RENDERTARGET_SCENE;
+        GenericFilterPasses(s_pvi);
+    }
     R_SetRenderTargetSize(&gfxCmdBufSourceState, keep);
     R_SetRenderTarget(gfxCmdBufContext, keep);
 }

@@ -1111,6 +1111,7 @@ void NoteHook(int entnum, unsigned notifyName, unsigned noteName)
 }
 } // namespace
 void H19_AIFootFx(const float *pos, const char *surf, bool onFire) __attribute__((weak));   // h19_mapcl.cpp (OLA E1b)
+const char *H19_AIFootPrepend(int entnum) __attribute__((weak));   // OLA E2b: self.footstepPrepend del CSC del mapa (nullptr = el de nivel)
 namespace {
 void PlayAIFootstep(const gentity_s *e, bool left, bool dog)
 {
@@ -1122,7 +1123,8 @@ void PlayAIFootstep(const gentity_s *e, bool left, bool dog)
     const int surf = CM_TracePointDown(st, en, 0x2820011, 0x3F00000, foot, nullptr, nullptr);
     char a[128];
     if (dog) snprintf(a, sizeof a, "fly_dog_step_run_default");
-    else snprintf(a, sizeof a, "fly_step_zombie_%s", Com_SurfaceTypeToName((surf >> 20) & 0x3F));
+    else snprintf(a, sizeof a, "%s%s", H19_AIFootPrepend && H19_AIFootPrepend(e->s.number) ? H19_AIFootPrepend(e->s.number) : "fly_step_zombie_",
+                  Com_SurfaceTypeToName((surf >> 20) & 0x3F));   // OLA E2b: ent.footstepPrepend del mapa (pasos del director de Coast)
     ++s_aiSteps;
     CG_PlaySound(0, ENTITYNUM_WORLD, foot, 0, 0, 1.0f, a);   // playsound(client, alias, pos): sonido en el mundo
     // OLA E1b: do_foot_effect (FX por suelo de setFootstepEffect); on_fire = eFlags2 0x200000 (cent->isBurning no existe aqui)

@@ -314,7 +314,8 @@ struct ClLight {
     std::string modelTn, onModel; int model = -1;
     std::string spinModel, spinFx, spinTag; int spin = -1; float yaw0 = 0;   // OLA 15F: script_light_on_spin_model / spin_fx / spin_tag (run_spin_model)
 };
-struct ClModel { std::string tn, name; XModel *m = nullptr; float org[3], axis[3][3]; int key = -2; bool vis = false; float ang[3] = { 0, 0, 0 }; std::string note; float pitchAdd = 0; };   // OLA 15F: angles, script_noteworthy y giro de reloj
+struct ClModel { std::string tn, name; XModel *m = nullptr; float org[3], axis[3][3]; int key = -2; bool vis = false; float ang[3] = { 0, 0, 0 }; std::string note; float pitchAdd = 0;
+                 std::vector<float> bones; };   // OLA 15F: angles, script_noteworthy y giro de reloj. OLA E2b: bones = DObjSkelMat de deformado (vacio = rigido)
 std::vector<ClLight> s_lights; std::vector<ClModel> s_models;
 bool s_on, s_init; int s_powerAt = -1; bool s_powerDone;
 void (*s_prevHook)(const client_t *, const char *);
@@ -607,6 +608,7 @@ void H7E_DrawClientModels(unsigned char techType)
             Material *mtl = skins ? skins[s].get() : nullptr; if (!mtl || !xs[s].vertCount) continue;
             std::vector<GfxPackedVertex> &v = s_cache[j * 64 + s];
             if (v.empty()) {
+                if (!built && (int)m.bones.size() == nb * 16) { built = true; memcpy(skel, m.bones.data(), nb * sizeof(DObjSkelMat)); }   // OLA E2b: pose animada
                 if (!built) { built = true; for (int b = 0; b < nb; ++b) { DObjSkelMat &o = skel[b];
                     for (int a = 0; a < 3; ++a) { for (int c = 0; c < 3; ++c) o.axis[a][c] = m.axis[a][c]; o.axis[a][3] = 0; }
                     memcpy(o.origin, m.org, 12); o.origin[3] = 1.0f; } }
@@ -651,6 +653,15 @@ void H19_ModelPose(int j, const float *org, const float *ang)   // org y ang a l
     ClModel &m = s_models[j];
     if (!memcmp(m.org, org, 12) && !memcmp(m.ang, ang, 12)) return;
     memcpy(m.org, org, 12); SetPose(j, ang);
+}
+// OLA E2b: pose animada de un script_model de cliente (fxanims de Coast: UseAnimTree + SetAnim del CSC). mats = nb DObjSkelMat de
+// deformado en mundo (base pose inversa * hueso * entidad, como h20_svmodels); nb 0 vuelve a la pose rigida.
+void H19_ModelBones(int j, const float *mats, int nb)
+{
+    if (j < 0 || j >= (int)s_models.size()) return;
+    ClModel &m = s_models[j];
+    if (nb <= 0) m.bones.clear(); else m.bones.assign(mats, mats + nb * 16);
+    if (j < (int)s_cacheModel.size()) s_cacheModel[j] = nullptr;   // vertices en mundo de nuevo
 }
 #else
 void H7E_ClientFrame() {}
