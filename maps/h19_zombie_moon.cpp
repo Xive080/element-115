@@ -37,7 +37,16 @@
 #include <universal/com_math_anglevectors.h>
 #include <universal/dvar.h>
 #include <database/db_registry.h>
+#include <gfx_d3d/r_material.h>
+#include <gfx_d3d/r_bsp.h>
+#include <gfx_d3d/r_init.h>
+#include <xanim/xmodel.h>
+#include <xanim/xmodel_utils.h>
 #include <game_mp/g_main_mp.h>
+#include <game_mp/g_utils_mp.h>
+#include <cgame_mp/cg_local_mp.h>
+#include <bgame/bg_weapons_def.h>
+#include <EffectsCore/fx_unique_handle.h>
 #include <bgame/bg_local.h>
 #include <clientscript/cscr_stringlist.h>
 #include <EffectsCore/fx_system.h>
@@ -64,6 +73,14 @@
 
 bool H7_VisionSetNaked(const char *name, float seconds) __attribute__((weak));   // h7_gfx.cpp
 void H7C_ClientVolFog(const float *v, int transitionMs) __attribute__((weak));     // h7c_gfx.cpp: setVolFog del CSC
+// OLA E3b (comunes, debiles): sacudida de camara (h5_fx.cpp, E2a/E2b), filtros de _filter.csc (h7_gfx.cpp, E2b), agujero negro (E3a),
+// modelos de cliente sin tope de distancia (h7e_light.cpp, E3b) y camara del frame (world_h4.cpp)
+void H5FX_Earthquake(float scale, float seconds, const float *org, float radius) __attribute__((weak));
+void H7_FilterPass(int f, int p, const char *material, int target, int s0, int s1, bool on) __attribute__((weak));
+void H7_FilterConst(int f, int p, int c, float v) __attribute__((weak));
+int H19_BhbInside() __attribute__((weak));
+void H19_ModelFar(int j, bool far) __attribute__((weak));
+void H4_GetCam(float *org, float *ang) __attribute__((weak));
 void __cdecl SV_GetConfigstring(unsigned int index, char *buffer, int bufferSize);
 const FxEffectDef *__cdecl FX_Register(char *name);                             // h5_fx.cpp
 extern FxSystemContainer *fx_systemPool;                                        // fx_system.cpp (lo reserva h5_fx)
@@ -103,7 +120,7 @@ void SetDvarV(const char *n, float a, float b, float c) { char s[64]; snprintf(s
 float RandRange(float a, float b) { return a + (b - a) * H19_Rand01(); }
 int RandInt(int a, int b) { int v = a + (int)(H19_Rand01() * (float)(b - a)); return v >= b ? b - 1 : v; }   // randomintrange [a, b)
 
-struct Pt { float org[3], ang[3]; std::string ss, sn, si; };
+struct Pt { float org[3], ang[3]; std::string ss, sn, si, model, target; };
 std::map<std::string, std::vector<Pt>> s_structs;   // script_struct por targetname (getstructarray)
 std::once_flag s_structOnce;
 void LoadStructs()
@@ -116,6 +133,8 @@ void LoadStructs()
             if (const char *s = H19_Str(k, "script_string")) p.ss = s;
             if (const char *s = H19_Str(k, "script_noteworthy")) p.sn = s;
             if (const char *s = H19_Str(k, "script_int")) p.si = s;
+            if (const char *s = H19_Str(k, "model")) p.model = s;
+            if (const char *s = H19_Str(k, "target")) p.target = s;
             s_structs[tn].push_back(p);
         }
     });
@@ -521,10 +540,384 @@ void Earth(const char *model)
 {
     static const float org[3] = { -22060.8f, -121800, 34463.4f }, ang[3] = { 18, 78, 22 }, park[3] = { -22060.8f, -121800, -100000 };
     if (!model) { if (s_earth >= 0) H19_ModelPose(s_earth, park, ang); return; }
-    if (s_earth < 0) s_earth = H19_AddModel(model, org, ang, "moon_earth");
+    if (s_earth < 0) { s_earth = H19_AddModel(model, org, ang, "moon_earth"); if (s_earth >= 0 && H19_ModelFar) H19_ModelFar(s_earth, true); }   // OLA E3b: sin tope
     else { H19_SetModel(s_earth, model); H19_ModelPose(s_earth, org, ang); }
     fprintf(stderr, "[H19] Moon: Tierra '%s' %s (a %.0f u: fuera del tope de dibujo de los modelos de cliente)\n", model, s_earth >= 0 ? "creada" : "NO esta en los datos",
         sqrtf(org[0] * org[0] + org[1] * org[1] + org[2] * org[2]));
+}
+
+// ===================================================================================================== OLA E3b: cielo, excavadoras, casco,
+// huevo, armas y risers (lo que faltaba del cliente de Moon; numeros de los .csc citados en cada funcion)
+float Dist(const float *a, const float *b) { const float x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2]; return sqrtf(x * x + y * y + z * z); }
+const float *PlayerOrg() { return g_entities[0].r.currentOrigin; }
+int s_quakes, s_rumbles;
+void Quake(float scale, float sec, const float *org, float radius)   // Earthquake() del CSC (CG_StartShakeCamera, h5_fx)
+{
+    ++s_quakes;
+    if (H5FX_Earthquake) H5FX_Earthquake(scale, sec, org, radius);
+}
+void Rumble(const char *name)   // PlayRumbleOnEntity / PlayRumbleOnPosition: el Mac no tiene vibracion; se cuenta
+{
+    if (s_rumbles++ < 6) fprintf(stderr, "[H19] Moon: vibracion '%s' (sin dispositivo en el Mac)\n", name);
+}
+const char *FxPath(const char *key, const char *fallback)   // level._effect[key] o la ruta del LoadFX del .csc comun
+{
+    if (const char *p = EffectPath(key)) return p;
+    return s_fxT0 >= 0 ? fallback : nullptr;
+}
+const float kFwd[3] = { 1, 0, 0 }, kUp[3] = { 0, 0, 1 };
+
+// ---- cielo: el skybox (world->skyBoxModel, skycubemaphdr que mezcla el cielo de la Tierra y las estrellas con r_skyTransition)
+// lo dibuja el codigo comun (H7E_DrawSkybox, R_AddSkyboxModel); aqui solo queda la Tierra como modelo lejano (Earth()).
+
+// ---- FX pegados a etiquetas de entidades del servidor (PlayFXOnTag): siguen al hueso cada frame (FX_UpdateEffectBolt)
+struct JointFx { std::string tag, path; unsigned h; const FxEffectDef *def; float last[3]; };
+bool TagMatrix(gentity_s *e, const char *tag, float m[4][3])
+{
+    const unsigned t = SL_FindLowercaseString(tag, SCRIPTINSTANCE_SERVER);
+    if (t && G_DObjGetWorldTagMatrix(e, t, m)) return true;
+    AnglesToAxis(e->r.currentAngles, m); memcpy(m[3], e->r.currentOrigin, 12); return false;
+}
+int s_tagFx, s_tagMiss;
+void TagFx(gentity_s *e, std::vector<JointFx> &v, const char *tag, const char *path)
+{
+    if (!path) return;
+    JointFx f; f.tag = tag; f.path = path; f.h = 0; f.def = nullptr;
+    float m[4][3]; const bool ok = TagMatrix(e, tag, m); memcpy(f.last, m[3], 12);
+    f.h = H19_PlayFx(path, m[3], m[0], m[2]);
+#ifdef H5FX
+    f.def = FX_Register((char *)path);
+#endif
+    ++s_tagFx; if (!ok) ++s_tagMiss;
+    v.push_back(f);
+}
+void KillTagFx(std::vector<JointFx> &v) { for (JointFx &f : v) H19_KillFx(f.h); v.clear(); }
+void MoveFx(unsigned h, const FxEffectDef *def, const float m[4][3])
+{
+#ifdef H5FX
+    if (!fx_systemPool || !h || !def) return;
+    FxEffectContainer *c = UniqueHandleToEffect(&FX_GetSystem(0)->system, h);
+    if (!c || c->effect.def != def) return;
+    float ax[3][3]; memcpy(ax, m, sizeof ax);
+    memcpy(c->effect.frameNow.origin, m[3], 12); AxisToQuat(ax, c->effect.frameNow.quat);
+#else
+    (void)h; (void)def; (void)m;
+#endif
+}
+void FollowTagFx(gentity_s *e, std::vector<JointFx> &v)
+{
+    for (JointFx &f : v) { float m[4][3]; TagMatrix(e, f.tag.c_str(), m);
+        const float d = Dist(m[3], f.last); if (!(d < 1e15f)) continue;
+        if (d > 256.0f) { H19_KillFx(f.h); f.h = H19_PlayFx(f.path.c_str(), m[3], m[0], m[2]); memcpy(f.last, m[3], 12); continue; }   // salto: renace
+        memcpy(f.last, m[3], 12); MoveFx(f.h, f.def, m); }
+}
+void FxAtTag(gentity_s *e, const char *tag, const char *path)   // PlayFX en la posicion del hueso (sin seguirlo)
+{
+    if (!path) return; float m[4][3]; TagMatrix(e, tag, m); H19_PlayFx(path, m[3], m[0], m[2]);
+}
+
+// ---- estelas que viajan (spawn tag_origin + PlayFXOnTag + MoveTo(dest, t) + movedone): ctt_trail_runner (zombie_moon_sq.csc)
+struct Trail { unsigned h; const FxEffectDef *def; float from[3], to[3]; int t0, dur; };
+std::vector<Trail> s_trails; int s_trailCount;
+void TrailStart(const char *path, const float *from, const float *to, float sec, int now)
+{
+    QueueSound(from, "evt_soul_release");
+    ++s_trailCount;
+    if (!path) return;
+    Trail t; memcpy(t.from, from, 12); memcpy(t.to, to, 12); t.t0 = now; t.dur = (int)(sec * 1000.0f);
+    t.h = H19_PlayFx(path, from, kFwd, kUp);
+#ifdef H5FX
+    t.def = FX_Register((char *)path);
+#else
+    t.def = nullptr;
+#endif
+    s_trails.push_back(t);
+}
+void TrailFrame(int now)
+{
+    for (size_t i = 0; i < s_trails.size();) {
+        Trail &t = s_trails[i]; const float f = t.dur > 0 ? fminf(1.0f, (float)(now - t.t0) / (float)t.dur) : 1.0f;
+        float m[4][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 0, 0, 0 } };
+        for (int k = 0; k < 3; ++k) m[3][k] = t.from[k] + (t.to[k] - t.from[k]) * f;
+        MoveFx(t.h, t.def, m);
+        if (f >= 1.0f) { QueueSound(t.to, "evt_soul_impact"); H19_KillFx(t.h); s_trails.erase(s_trails.begin() + i); } else ++i;   // movedone
+    }
+}
+
+// ---- bucles de temblor (Earthquake + vibracion cada RandomFloatRange) con fin por tiempo o por aviso
+struct QLoop { int id, next, until; float smin, smax, sec, radius, wmin, wmax; int ent; const char *rumble; float rdist; bool atPlayer; };
+std::vector<QLoop> s_qloops;
+void QLoopStart(int id, float smin, float smax, float sec, float radius, float wmin, float wmax, int ent, const char *rumble, float rdist, int now, int untilMs = -1)
+{
+    for (QLoop &q : s_qloops) if (q.id == id) return;   // ya en marcha (un solo hilo por aviso)
+    QLoop q; q.id = id; q.next = now; q.until = untilMs; q.smin = smin; q.smax = smax; q.sec = sec; q.radius = radius; q.wmin = wmin; q.wmax = wmax; q.ent = ent;
+    q.rumble = rumble; q.rdist = rdist; q.atPlayer = ent < 0; s_qloops.push_back(q);
+}
+void QLoopStop(int id) { for (size_t i = 0; i < s_qloops.size(); ++i) if (s_qloops[i].id == id) { s_qloops.erase(s_qloops.begin() + i); return; } }
+void QLoopFrame(int now)
+{
+    for (size_t i = 0; i < s_qloops.size();) {
+        QLoop &q = s_qloops[i];
+        if (q.until >= 0 && now >= q.until) { s_qloops.erase(s_qloops.begin() + i); continue; }
+        if (now >= q.next) {
+            const float *org = q.atPlayer ? PlayerOrg() : g_entities[q.ent].r.currentOrigin;
+            Quake(RandRange(q.smin, q.smax), q.sec, org, q.radius);
+            if (q.rumble && (q.rdist <= 0 || Dist(PlayerOrg(), org) < q.rdist)) Rumble(q.rumble);
+            q.next = now + (int)(RandRange(q.wmin, q.wmax) * 1000.0f);
+        }
+        ++i;
+    }
+}
+
+// ---- excavadoras (zombie_moon_digger.csc): clientflags de scriptmover 0 (orugas en marcha), 1 (pala cavando) y 2 (brazo)
+struct MoverSt { int use; unsigned fl; std::vector<JointFx> track, arm; };
+std::map<int, MoverSt> s_mv;
+int s_digMoving, s_digDigging, s_digArm, s_qedSounds;
+std::set<int> s_qed;
+const int kQMove = 1000, kQDig = 2000;   // ids de bucle + numero de entidad
+void DiggerFlags(gentity_s *e, int n, unsigned fl, unsigned ch, int now)
+{
+    MoverSt &m = s_mv[n];
+    if (ch & 1u) {   // digger_moving_earthquake_rumble
+        KillTagFx(m.track); QLoopStop(kQMove + n);
+        if (fl & 1u) {
+            ++s_digMoving;
+            for (const char *t : { "tag_fx_headlight1", "tag_fx_headlight2" }) TagFx(e, m.track, t, EffectPath("exca_beam"));
+            for (const char *t : { "tag_fx_blink1", "tag_fx_blink2" }) TagFx(e, m.track, t, EffectPath("exca_blink"));
+            TagFx(e, m.track, "tag_origin", EffectPath("digger_treadfx_fwd"));
+            QLoopStart(kQMove + n, .15f, .25f, 3.0f, 2500, .05f, .15f, n, "slide_rumble", 2500, now);   // Earthquake(.15-.25, 3, 2500)
+            fprintf(stderr, "[H19] Moon: excavadora en marcha (ent %d): luces, baliza, orugas y temblor t=%d\n", n, now);
+        }
+    }
+    if (ch & 2u) {   // digger_digging_earthquake_rumble (blade_center)
+        QLoopStop(kQDig + n);
+        if (fl & 2u) { ++s_digDigging; QLoopStart(kQDig + n, .12f, .17f, 3.0f, 1500, .1f, .25f, n, "grenade_rumble", 1500, now);
+            fprintf(stderr, "[H19] Moon: excavadora cavando (ent %d): temblor t=%d\n", n, now); }
+    }
+    if (ch & 4u) {   // digger_arm_fx
+        KillTagFx(m.arm);
+        if (fl & 4u) { ++s_digArm; for (const char *t : { "tag_fx_blink3", "tag_fx_blink4" }) TagFx(e, m.arm, t, EffectPath("exca_blink")); }
+    }
+}
+
+// ---- casco (_zombiemode_equip_gasmask.csc): clientflags del jugador 9 (overlay) y 8 (quitar overlay)
+bool s_mask; int s_maskOn;
+std::mutex s_aMu; std::vector<int> s_maskSnd;   // 1 = bucle evt_gasmask_loop + snapshot; 0 = evt_gasmask_off + quitar
+void Gasmask(bool on, int now)
+{
+    if (on == s_mask) return;
+    s_mask = on; if (on) ++s_maskOn;
+    if (H7_FilterPass && H7_FilterConst) {   // enable_filter_hazmat(player, 0, 0, 1.0): pase 0 del filtro 0, escena -> escena, opacidad 1
+        if (on) { H7_FilterPass(0, 0, "zom_generic_filter_hazmat_moon", 3, 3, 0, true); H7_FilterConst(0, 0, 0, 1.0f); }
+        else H7_FilterPass(0, 0, nullptr, 0, 0, 0, false);
+    }
+    if (cg_s *cg = CG_GetLocalClientGlobals(0)) {   // set_overlay_material(0, hazmat_1, sort 1) + set_overlay_constant(0, 0, 1) + enabled
+        static Material *ov = Material_RegisterHandle("zom_generic_overlay_hazmat_1", 3);
+        cg->genericOverlayMaterial[0] = ov; cg->genericOverlaySortIndex[0] = 1; cg->genericOverlayParam[0][0] = 1.0f; cg->genericOverlayEnabled[0] = on && ov;
+    }
+    { std::lock_guard<std::mutex> g(s_aMu); s_maskSnd.push_back(on ? 1 : 0); }
+    fprintf(stderr, "[H19] Moon: casco %s (filtro hazmat + overlay) t=%d\n", on ? "puesto" : "quitado", now);
+}
+
+// ---- huevo de Pascua (zombie_moon_sq.csc)
+std::vector<float> s_cttTargets;   // level._ctt_targets (origenes, de 3 en 3)
+void BuildCtt(bool second)   // build_ctt_targets: el struct "target" de cada tanque
+{
+    s_cttTargets.clear();
+    for (const char *tn : { "sq_first_tank", "sq_second_tank" }) {
+        if (!second && !strcmp(tn, "sq_second_tank")) continue;
+        for (const Pt &t : S(tn)) { const std::vector<Pt> &c = S(t.target); if (c.empty()) continue; for (int k = 0; k < 3; ++k) s_cttTargets.push_back(c[0].org[k]); }
+    }
+    fprintf(stderr, "[H19] Moon: huevo: %zu tanques de almas\n", s_cttTargets.size() / 3);
+}
+bool s_samOk; float s_samOrg[3]; int s_sam = -1, s_samAt = -1; float s_samZ[3];
+std::vector<int> s_vgEnts; int s_vgCount; float s_vgZ[3]; int s_vgAt = -1; unsigned s_vgGlow;
+int AddStructModel(const Pt &p, const char *tn)
+{
+    if (p.model.empty()) return -1;
+    return H19_AddModel(p.model.c_str(), p.org, p.ang, tn);
+}
+void SoulSwap(int now)   // soul_swap (clientflag 1 del jugador)
+{
+    {   // vision_wobble (un solo jugador local)
+        SetDvarF("r_poisonFX_debug_amount", 0); SetDvar("r_poisonFX_debug_enable", "1"); SetDvarF("r_poisonFX_pulse", 2);
+        SetDvarF("r_poisonFX_warpX", -0.3f); SetDvarF("r_poisonFX_warpY", 0.15f); SetDvarF("r_poisonFX_dvisionA", 0); SetDvarF("r_poisonFX_dvisionX", 0);
+        SetDvarF("r_poisonFX_dvisionY", 0); SetDvarF("r_poisonFX_blurMin", 0); SetDvarF("r_poisonFX_blurMax", 3); SetDvarF("r_poisonFX_debug_amount", 1);
+        int t = now + 3000; float amount = 1;
+        while (amount > 0) { amount = amount - 0.064f > 0 ? amount - 0.064f : 0; const float a = amount; After(t, [a](int) { SetDvarF("r_poisonFX_debug_amount", a); }); t += 16; }
+        After(t, [](int) { SetDvarF("r_poisonFX_debug_amount", 0); SetDvar("r_poisonFX_debug_enable", "0"); });
+    }
+    if (!s_samOk) { fprintf(stderr, "[H19] Moon: soul_swap sin level._sam (el .csc daria error de script) t=%d\n", now); return; }
+    float a[3], b[3]; memcpy(a, PlayerOrg(), 12); a[2] += 24; memcpy(b, s_samOrg, 12); b[2] += 24;
+    TrailStart(EffectPath("soul_swap_trail"), a, b, 0.5f, now);
+    TrailStart(EffectPath("soul_swap_trail"), b, a, 0.5f, now);
+    fprintf(stderr, "[H19] Moon: soul_swap: estelas jugador <-> Samantha y vision_wobble t=%d\n", now);
+}
+void EggFrame(int now)
+{
+    if (s_sam >= 0 && s_samAt >= 0) {   // sam_rise_and_bob: MoveTo(target, 3) y luego z0 + 7 sin(75 t)
+        const float f = fminf(1.0f, (float)(now - s_samAt) / 3000.0f); float o[3], ang[3]; H19_ModelGet(s_sam, o, ang);
+        if (f < 1.0f) for (int k = 0; k < 3; ++k) o[k] = s_samOrg[k] + (s_samZ[k] - s_samOrg[k]) * f;
+        else { memcpy(o, s_samZ, 12); o[2] += 7.0f * sinf((75.0f * (now - s_samAt - 3000) / 1000.0f) * (float)M_PI / 180.0f); if (!s_samOk) { s_samOk = true; } memcpy(s_samOrg, o, 12); }
+        H19_ModelPose(s_sam, o, ang);
+        if (f >= 1.0f) memcpy(s_samOrg, o, 12);
+    }
+    if (s_vgAt >= 0) for (int j : s_vgEnts) {   // bob_vg: amplitud 2, frecuencia 100
+        float o[3], ang[3]; H19_ModelGet(j, o, ang); memcpy(o, s_vgZ, 12); o[2] += 2.0f * sinf((100.0f * (now - s_vgAt) / 1000.0f) * (float)M_PI / 180.0f); H19_ModelPose(j, o, ang);
+        if (s_vgGlow) { float m[4][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { o[0], o[1], o[2] } };
+#ifdef H5FX
+            MoveFx(s_vgGlow, FX_Register((char *)EffectPath("vrill_glow")), m);
+#endif
+        }
+    }
+}
+void EggNotify(const std::string &ev, int now)
+{
+    if (ev == "ctt1") BuildCtt(false);
+    else if (ev == "ctt2") BuildCtt(true);
+    else if (ev == "ctto") s_cttTargets.clear();
+    else if (ev == "cp") { int n = 0; for (const Pt &p : S("sq_cp_final")) { n += AddStructModel(p, "sq_cp_final") >= 0; QueueSound(p.org, "evt_clank"); }
+        fprintf(stderr, "[H19] Moon: huevo cp: %d placas colocadas t=%d\n", n, now); }
+    else if (ev == "wp") { for (const Pt &p : S("sq_wire_final")) { AddStructModel(p, "sq_wire_final"); QueueSound(p.org, "evt_start_old_computer"); }
+        fprintf(stderr, "[H19] Moon: huevo wp: cable colocado t=%d\n", now); }
+    else if (ev == "sm" && s_sam < 0) {
+        const std::vector<Pt> &v = S("sq_sam"); if (v.empty()) return;
+        s_sam = AddStructModel(v[0], "sq_sam"); memcpy(s_samOrg, v[0].org, 12); memcpy(s_samZ, v[0].org, 12);
+        const std::vector<Pt> &e = S(v[0].target); if (!e.empty()) memcpy(s_samZ, e[0].org, 12);
+        if (const char *p = EffectPath("lght_marker_flare")) H19_PlayFx(p, v[0].org, kFwd, kUp);
+        { std::lock_guard<std::mutex> g(s_aMu); s_maskSnd.push_back(2); }   // playloopsound evt_samantha_reveal_loop (1)
+        s_samAt = now;
+        fprintf(stderr, "[H19] Moon: huevo sm: Samantha (%s) sube a %.0f %.0f %.0f t=%d\n", v[0].model.c_str(), s_samZ[0], s_samZ[1], s_samZ[2], now);
+    }
+    else if (ev == "vg") {
+        ++s_vgCount;
+        if (s_vgCount == 1) { for (const Pt &p : S("sq_charge_vg_pos")) { const int j = AddStructModel(p, "sq_charge_vg_pos"); if (j >= 0) s_vgEnts.push_back(j); memcpy(s_vgZ, p.org, 12); } s_vgAt = now; }
+        else if (s_vgCount == 2) { if (const char *p = EffectPath("vrill_glow")) s_vgGlow = H19_PlayFx(p, s_vgZ, kFwd, kUp); }
+        else if (s_vgCount == 3) { H19_KillFx(s_vgGlow); for (int j : s_vgEnts) Hide(j, true); s_vgEnts.clear(); s_vgAt = -1; }
+        else if (s_vgCount == 4) { for (const Pt &p : S("sq_vg_final")) { AddStructModel(p, "sq_vg_final"); if (const char *f = EffectPath("vrill_glow")) H19_PlayFx(f, p.org, kFwd, kUp); } }
+        fprintf(stderr, "[H19] Moon: huevo vg %d t=%d\n", s_vgCount, now);
+    }
+    else if (ev == "p_r") QLoopStart(3001, 0, 0, 0, 0, .05f, .15f, -1, "slide_rumble", 0, now);   // solo vibracion cerca de pyramid_walls_retract
+    else if (ev == "s_r") QLoopStop(3001);
+    else if (ev == "st1") QLoopStart(3002, .2f, .25f, 5.0f, 100, .1f, .15f, -1, "slide_rumble", 0, now);
+    else if (ev == "sp1") QLoopStop(3002);
+    else if (ev == "R_R") QLoopStart(3003, .15f, .2f, 5.0f, 100, .1f, .15f, -1, "slide_rumble", 0, now, now + 4500);   // cohete sube
+    else if (ev == "R_L") QLoopStart(3004, .26f, .31f, 5.0f, 100, .1f, .15f, -1, "damage_light", 0, now, now + 6000);   // cohetes despegan
+    else if (ev == "dte") {   // dte_watcher + d_e: vision zombie_coast_powerOn (7) 0,1 s; a los 3 s se quita en 6 s; 5,9 s mas tarde, la de antes
+        s_dteDone = true;
+        VisionApply("zombie_coast_powerOn", 7, 0.1f);
+        After(now + 3000, [](int) { VisionRemove("zombie_coast_powerOn", 6.0f); });
+        After(now + 8900, [](int t) { if (s_prevVis.empty()) s_prevVis = "zme"; if (const char *n = VisName(s_prevVis)) VisionApply(n, 5, 1.0f); (void)t; });
+        After(now + 3500, [](int t) { Quake(RandRange(.4f, .45f), 5, PlayerOrg(), 100); Rumble("damage_heavy");
+            QLoopStart(3005, .35f, .4f, 5.0f, 100, .1f, .15f, -1, "damage_light", 0, t + 200, t + 4000); });
+        fprintf(stderr, "[H19] Moon: huevo dte: la Tierra estalla (vision, temblores) t=%d\n", now);
+    }
+}
+
+// ---- actores: clientflags 0 (baja gravedad), 2 (alma al tanque, CTT), 6 / 9 (Wave Gun), 7 / 8 (risers de baja gravedad y normales)
+struct ActSt { int use; unsigned fl; bool hit, lowg; std::vector<JointFx> eyes; int dustUntil, dustNext; bool dustLg; };
+std::map<int, ActSt> s_act;
+int s_souls, s_mwHits, s_mwBloat, s_mwPops, s_risers, s_risersLg, s_lowg;
+void ActorsFrame(int now)
+{
+    std::set<int> alive;
+    for (int n = 0; n < level.num_entities; ++n) {
+        gentity_s *e = &g_entities[n];
+        if (!e->r.inuse || e->s.eType != ET_ACTOR) continue;
+        alive.insert(n);
+        auto it = s_act.find(n);
+        if (it != s_act.end() && it->second.use != e->s.lerp.useCount) { KillTagFx(it->second.eyes); s_act.erase(it); it = s_act.end(); }
+        const unsigned fl = e->s.lerp.eFlags2;
+        if (it == s_act.end()) { ActSt a{}; a.use = e->s.lerp.useCount; a.fl = 0; a.dustUntil = -1; it = s_act.emplace(n, a).first; }
+        ActSt &a = it->second; const unsigned ch = fl ^ a.fl; a.fl = fl;
+        if (ch & 1u) { a.lowg = fl & 1u; if (a.lowg) ++s_lowg; }   // zombie_low_gravity: SetPhysicsGravity(-136) del ragdoll (el arnes no tiene ragdoll de cliente)
+        if ((ch & 4u) && (fl & 4u)) {   // zombie_release_soul: estela al tanque mas cercano (min_dist 9999^2)
+            int best = -1; float bd = 9999.0f * 9999.0f;
+            for (size_t k = 0; k + 2 < s_cttTargets.size(); k += 3) { const float dx = e->r.currentOrigin[0] - s_cttTargets[k], dy = e->r.currentOrigin[1] - s_cttTargets[k + 1],
+                dz = e->r.currentOrigin[2] - s_cttTargets[k + 2], d = dx * dx + dy * dy + dz * dz; if (d < bd) { bd = d; best = (int)k; } }
+            if (best >= 0) { float a0[3], b0[3]; memcpy(a0, e->r.currentOrigin, 12); a0[2] += 24; memcpy(b0, &s_cttTargets[best], 12); b0[2] -= 12;
+                TrailStart(EffectPath("fx_weak_sauce_trail"), a0, b0, 0.5f, now); ++s_souls;
+                if (s_souls <= 3 || s_souls % 25 == 0) fprintf(stderr, "[H19] Moon: alma %d al tanque (%.0f %.0f %.0f) t=%d\n", s_souls, b0[0], b0[1], b0[2], now); }
+        }
+        if ((ch & (1u << 6)) && (fl & (1u << 6))) {   // microwavegun_zombie_initial_hit_response
+            if (a.eyes.empty()) TagFx(e, a.eyes, "j_eyeball_le", FxPath("microwavegun_sizzle_blood_eyes", "weapon/microwavegun/fx_sizzle_blood_eyes"));
+            QueueSound(e->r.currentOrigin, "wpn_mgun_impact_zombie"); a.hit = true; ++s_mwHits;
+            if (s_mwHits <= 3) fprintf(stderr, "[H19] Moon: Wave Gun: golpe inicial ent %d (ojos) t=%d\n", n, now);
+        }
+        if (ch & (1u << 9)) {   // microwavegun_zombie_expand_response
+            if ((fl & (1u << 9)) && a.hit) { QueueSound(e->r.currentOrigin, "wpn_mgun_impact_zombie"); ++s_mwBloat; }   // microwavegun_bloat (scriptVector3 del shader: sin portar)
+            else {
+                KillTagFx(a.eyes);
+                const unsigned t = SL_FindLowercaseString("j_spinelower", SCRIPTINSTANCE_SERVER); float m[4][3];
+                const char *tag = (t && G_DObjGetWorldTagMatrix(e, t, m)) ? "j_spinelower" : "j_spine1";
+                FxAtTag(e, tag, a.lowg ? FxPath("microwavegun_sizzle_death_mist_low_g", "weapon/microwavegun/fx_sizzle_mist_low_g")
+                                       : FxPath("microwavegun_sizzle_death_mist", "weapon/microwavegun/fx_sizzle_mist"));
+                QueueSound(e->r.currentOrigin, "wpn_mgun_explode_zombie"); ++s_mwPops;
+                if (s_mwPops <= 3) fprintf(stderr, "[H19] Moon: Wave Gun: el zombi revienta ent %d (%s) t=%d\n", n, a.lowg ? "baja gravedad" : "normal", now);
+            }
+        }
+        const bool rLg = (ch & (1u << 7)) && (fl & (1u << 7)), rN = (ch & (1u << 8)) && (fl & (1u << 8));
+        if (rLg || rN) {   // handle_zombie_lowg_risers / handle_zombie_risers (_zombiemode.csc)
+            QueueSound(e->r.currentOrigin, "zmb_zombie_spawn");
+            float o[3]; memcpy(o, e->r.currentOrigin, 12); o[2] += (float)RandInt(5, 10);
+            H19_PlayFx(rLg ? FxPath("rise_burst_lg", "") : FxPath("rise_burst", "maps/zombie/fx_mp_zombie_hand_dirt_burst"), o, kFwd, kUp);
+            float o2[3] = { e->r.currentOrigin[0] + (float)RandInt(-10, 10), e->r.currentOrigin[1] + (float)RandInt(-10, 10), e->r.currentOrigin[2] + (float)RandInt(5, 10) };
+            const std::string bil = rLg ? (FxPath("rise_billow_lg", "") ? FxPath("rise_billow_lg", "") : "") : "maps/zombie/fx_mp_zombie_body_dirt_billowing";
+            After(now + 250, [o2, bil](int) { if (!bil.empty()) H19_PlayFx(bil.c_str(), o2, kFwd, kUp); });
+            a.dustUntil = now + 250 + 7500; a.dustNext = now + 250; a.dustLg = rLg;
+            if (rLg) ++s_risersLg; else ++s_risers;
+        }
+        if (a.dustUntil >= 0 && now >= a.dustNext) {   // rise_dust_fx: PlayfxOnTag(rise_dust[_lg], J_SpineUpper) cada 0,1 s durante 7,5 s
+            if (now >= a.dustUntil) a.dustUntil = -1;
+            else { FxAtTag(e, "j_spineupper", a.dustLg ? FxPath("rise_dust_lg", "") : FxPath("rise_dust", "maps/zombie/fx_mp_zombie_body_dust_falling")); a.dustNext = now + 100; }
+        }
+        FollowTagFx(e, a.eyes);
+    }
+    for (auto it = s_act.begin(); it != s_act.end();) { if (alive.count(it->first)) { ++it; continue; } KillTagFx(it->second.eyes); it = s_act.erase(it); }   // entityshutdown
+}
+// ---- jugador: clientflags 1 (soul swap), 2 (jadeo: vibracion), 8/9 (casco)
+unsigned s_plFl; bool s_plInit;
+void PlayerFlagsFrame(int now)
+{
+    gentity_s *pl = &g_entities[0]; if (!pl->r.inuse || !pl->client) return;
+    const unsigned fl = pl->client->ps.eFlags2;
+    if (!s_plInit) { s_plInit = true; s_plFl = fl & ~((1u << 1) | (1u << 9)); }
+    const unsigned ch = fl ^ s_plFl; s_plFl = fl;
+    if ((ch & 2u) && (fl & 2u)) SoulSwap(now);
+    if ((ch & 4u) && (fl & 4u)) Rumble(RandInt(0, 100) > 70 ? "damage_light" : "damage_heavy");   // player_gasp_rumble
+    if (ch & (1u << 9)) Gasmask((fl >> 9) & 1u, now);   // gasmask_overlay_handler
+    if ((ch & (1u << 8)) && (fl & (1u << 8))) Gasmask(false, now);   // gasmask_overlay_remove_handler
+}
+// ---- QED: quantum_bomb_spawned (callback de misil de _callbacks.csc): un origen que sigue a la granada con wpn_quantum_rise.
+// Gersh: los FX y la vision los lleva el comun E3a; Moon cambia la vision a zombie_moon_black_hole (prioridad 10, 2 s).
+void WeaponsFrame(int now)
+{
+    static int qedIdx = -2; if (qedIdx == -2) { qedIdx = -1; for (int w = 1; w < 256; ++w) { const WeaponVariantDef *d = BG_GetWeaponVariantDef(w); if (d && d->szInternalName.get() && !strcmp(d->szInternalName.get(), "zombie_quantum_bomb")) { qedIdx = w; break; } } }
+    std::set<int> live;
+    for (int n = 0; qedIdx > 0 && n < level.num_entities; ++n) { gentity_s *e = &g_entities[n];
+        if (!e->r.inuse || e->s.eType != ET_MISSILE || (int)e->s.weapon != qedIdx) continue;
+        live.insert(n); if (s_qed.insert(n).second) { QueueSound(e->r.currentOrigin, "wpn_quantum_rise"); ++s_qedSounds; fprintf(stderr, "[H19] Moon: QED lanzado (ent %d): wpn_quantum_rise t=%d\n", n, now); } }
+    for (auto it = s_qed.begin(); it != s_qed.end();) if (live.count(*it)) ++it; else it = s_qed.erase(it);
+    if (H19_BhbInside) { static int bh = 0; const int in = H19_BhbInside();
+        if (in != bh) { bh = in; if (in) VisionApply("zombie_moon_black_hole", 10, 2.0f); else VisionRemove("zombie_moon_black_hole", 2.0f); } }
+}
+void ScriptMoversE3b(int now)   // excavadoras (bits 0-2) de los scriptmover del servidor; el 3 (pads) lo lleva MoversFrame
+{
+    std::set<int> alive;
+    for (int n = 0; n < level.num_entities; ++n) {
+        gentity_s *e = &g_entities[n];
+        if (!e->r.inuse || e->s.eType != ET_SCRIPTMOVER) continue;
+        alive.insert(n);
+        auto it = s_mv.find(n);
+        if (it != s_mv.end() && it->second.use != e->s.lerp.useCount) { KillTagFx(it->second.track); KillTagFx(it->second.arm); QLoopStop(kQMove + n); QLoopStop(kQDig + n); s_mv.erase(it); it = s_mv.end(); }
+        const unsigned fl = e->s.lerp.eFlags2 & 7u;
+        if (it == s_mv.end()) { if (!fl) continue; MoverSt m{}; m.use = e->s.lerp.useCount; m.fl = 0; it = s_mv.emplace(n, m).first; }
+        const unsigned ch = fl ^ it->second.fl; it->second.fl = fl;
+        if (ch) DiggerFlags(e, n, fl, ch, now);
+        FollowTagFx(e, it->second.track); FollowTagFx(e, it->second.arm);
+    }
+    for (auto it = s_mv.begin(); it != s_mv.end();) { if (alive.count(it->first)) { ++it; continue; }
+        KillTagFx(it->second.track); KillTagFx(it->second.arm); QLoopStop(kQMove + it->first); QLoopStop(kQDig + it->first); it = s_mv.erase(it); }
 }
 
 // ===================================================================================================== avisos del servidor
@@ -563,12 +956,18 @@ void Notify(const std::string &ev, int now)
     else if (ev == "BIO") {   // wait_for_biodome_breach
         const int n = H19_SwapModelByTn("biodome_breached", "p_zom_moon_biodome_hole_filled", "p_zom_moon_biodome_hole_broken");
         H19_MixerActivate("sl9", now); H19_MixerActivate("sl10", now);
+        {   // biodome_breach: a menos de 2500 u de biodome_breached, Earthquake(.5, 3, jugador, 1500) + bio_breach_rumble (10 x damage_heavy)
+            float o[3], a[3]; bool nearDome = false; for (int j : ModelsByTn("biodome_breached")) if (H19_ModelGet(j, o, a) && Dist(o, PlayerOrg()) < 2500.0f) nearDome = true;
+            if (nearDome) { Quake(.5f, 3.0f, PlayerOrg(), 1500.0f); for (int k = 0; k < 10; ++k) Rumble("damage_heavy"); }
+        }
         fprintf(stderr, "[H19] Moon: cupula del biodomo rota (BIO): %d modelo(s) cambiados t=%d\n", n, now);
     }
     else if (ev == "ZEG") {   // game_over_fog_and_vision_fix
         if (s_prevVis == "zme" || s_prevVis == "zmi" || s_prevVis == "zmb" || s_prevVis == "zmt") FogMoonExterior(0, false); else FogNml(0);
     }
-    else if (ev == "dte") s_dteDone = true;   // dte_watcher (huevo final) solo marca level._dte_done
+    else if (ev == "EDR") { for (auto &m : s_mv) QLoopStop(kQDig + m.first); }   // stop_all_digger_rumble
+    else if (ev == "dte" || ev == "ctt1" || ev == "ctt2" || ev == "ctto" || ev == "cp" || ev == "wp" || ev == "sm" || ev == "vg" || ev == "p_r" || ev == "s_r"
+             || ev == "st1" || ev == "sp1" || ev == "R_R" || ev == "R_L") EggNotify(ev, now);
     else {
         for (Console &c : s_cons) { if (ev == c.on && c.j >= 0) ConsoleFx(c, true); else if (ev == c.off && c.j >= 0 && s_consInit) ConsoleFx(c, false); }
         for (int k = 0; k < 3; ++k) if (ev == kAz[k] && s_breach[k] < 0) {   // breach_*_fx
@@ -579,8 +978,29 @@ void Notify(const std::string &ev, int now)
 }
 
 int s_padModels;
+void SkyDiag()   // H19_MOON_SKYDIAG=1: texturas y constantes de codigo de las tecnicas del material del cielo
+{
+    if (!getenv("H19_MOON_SKYDIAG")) return;
+    const char *sbm = rgp.world ? rgp.world->skyBoxModel.get() : nullptr;
+    fprintf(stderr, "[H19] cielo: skyBoxModel '%s'\n", sbm ? sbm : "(ninguno)");
+    std::vector<Material *> mats; if (Material *w = DB_FindXAssetHeader(ASSET_TYPE_MATERIAL, (char *)"wc/sky_day", 0, -1).material) mats.push_back(w);
+    if (sbm && *sbm) if (XModel *xm = DB_FindXAssetHeader(ASSET_TYPE_XMODEL, (char *)sbm, 0, -1).model) {
+        XSurface *xs; const int ns = XModelGetSurfaces(xm, &xs, 0); PTR32(Material) *sk = XModelGetSkins(xm, 0);
+        fprintf(stderr, "[H19] cielo: modelo %d superficies radio %.0f\n", ns, xm->radius);
+        for (int i = 0; i < ns && sk; ++i) if (sk[i].get()) mats.push_back(sk[i].get()); }
+    for (Material *m : mats) { fprintf(stderr, "[H19] cielo material '%s'\n", m->info.name.get());
+    for (int i = 0; i < m->textureCount; ++i) { const MaterialTextureDef &t = m->textureTable.get()[i]; const GfxImage *im = t.u.image.get();
+        fprintf(stderr, "[H19] cielo tex %d sem %d hash %08x %s\n", i, t.semantic, t.nameHash, im ? im->name.get() : "?"); }
+    MaterialTechniqueSet *ts = m->techniqueSet.get(); if (!ts) continue;
+    for (int k = 0; k < 130; ++k) { MaterialTechnique *te = ts->techniques[k].get(); if (!te) continue;
+        for (int p = 0; p < te->passCount; ++p) { const MaterialPass &ps = te->passArray[p]; const MaterialShaderArgument *a = ps.args.get();
+            std::string s; for (int n = 0; a && n < ps.perPrimArgCount + ps.perObjArgCount + ps.stableArgCount; ++n) {
+                char b[48]; snprintf(b, sizeof b, " t%d:d%d:%u", a[n].type, a[n].dest, (unsigned)a[n].u.codeConst.index); s += b; }
+            fprintf(stderr, "[H19] cielo tecnica %d '%s' pase %d:%s\n", k, te->name.get(), p, s.c_str()); } } }
+}
 void Init(const std::vector<H19Kv> &)
 {
+    SkyDiag();
     LoadStructs(); EnsureCreateFx();
     s_fogTrigs = LoadTrigs({ "zombie_moonExterior", "zombie_moonInterior", "zombie_moonBiodome", "zombie_moonTunnels", "zombie_nmlVision" });
     for (int j : ModelsByTn("jump_pads")) { Pad p; H19_ModelGet(j, p.org, p.ang); p.glow = 0; s_pads.push_back(p); }
@@ -639,6 +1059,9 @@ void DiagFrame(int now)
     bool inDogs = false; for (const Trig &t : dogVol) inDogs = inDogs || Touching(t.model, t.org, pl->r.currentOrigin, pl->r.mins, pl->r.maxs);
     fprintf(stderr, "[H19] Moon diag t=%d: jugador (%.0f %.0f %.0f) gravedad %d salud %d jadeo %d volumen de perros %d | IA:%s\n", now, pl->r.currentOrigin[0],
         pl->r.currentOrigin[1], pl->r.currentOrigin[2], pl->client->ps.gravity, pl->health, (pl->client->ps.eFlags2 >> 2) & 1, inDogs, s.empty() ? " ninguna" : s.c_str());
+    fprintf(stderr, "[H19] Moon diag E3b: excavadoras marcha/cava/brazo %d/%d/%d, FX en huesos %d (%d sin hueso), temblores %d, vibraciones %d, casco %d, "
+        "almas %d, Wave Gun ojos/hinchados/estallidos %d/%d/%d, QED %d, risers %d (+%d grandes), gravedad baja %d\n", s_digMoving, s_digDigging, s_digArm, s_tagFx, s_tagMiss,
+        s_quakes, s_rumbles, s_maskOn, s_souls, s_mwHits, s_mwBloat, s_mwPops, s_qedSounds, s_risers, s_risersLg, s_lowg);
 }
 TestQ s_testG;
 void Frame(int now)
@@ -659,6 +1082,13 @@ void Frame(int now)
     }
     RunTasks(now);
     FogFrame(now);
+    ScriptMoversE3b(now);
+    ActorsFrame(now);
+    PlayerFlagsFrame(now);
+    WeaponsFrame(now);
+    QLoopFrame(now);
+    TrailFrame(now);
+    EggFrame(now);
     MoversFrame(now);
     DishFrame(now);
     DoorFrame(now);
@@ -781,6 +1211,16 @@ void AudioFrame(bool)
     const double now = level.time;
     TestNotify(s_testA, level.time, [](const std::string &ev) { AudioNotifyEv(ev); }, "sonido");
     { std::vector<Snd> q; { std::lock_guard<std::mutex> g(s_sndMu); q.swap(s_sndQ); } for (const Snd &s : q) Play(s.org, s.alias.c_str()); }
+    {   // OLA E3b: playsounds_gasmask + enable_gasmask_audio (snapshot zmb_moon_gasmask) y el bucle de Samantha
+        std::vector<int> q; { std::lock_guard<std::mutex> g(s_aMu); q.swap(s_maskSnd); }
+        static int maskFake;
+        for (int c : q) {
+            if (c == 1) { if (!maskFake) maskFake = H19A_FakeAt(kZero); if (maskFake) H19A_PlayLoop(maskFake, "evt_gasmask_loop", .5f);
+                SND_SetSnapshot(SND_SNAPSHOT_SCRIPT, "zmb_moon_gasmask", 0.0f, 1.0f); }
+            else if (c == 0) { Play(kZero, "evt_gasmask_off"); if (maskFake) H19A_StopLoop(maskFake, .5f); SND_SetSnapshot(SND_SNAPSHOT_SCRIPT, "default", 0.0f, 1.0f); }
+            else if (c == 2) { const std::vector<Pt> &v = S("sq_sam"); if (!v.empty()) if (const int f = H19A_FakeAt(v[0].org)) H19A_PlayLoop(f, "evt_samantha_reveal_loop", 1.0f); }
+        }
+    }
     for (size_t i = 0; i < s_timed.size();) { if (now >= s_timed[i].at) { Timed t = s_timed[i]; s_timed.erase(s_timed.begin() + i); Play(t.org, t.alias.c_str()); } else ++i; }
     if (s_doorStopAt >= 0 && now >= s_doorStopAt) { s_doorStopAt = -1; for (int f : s_doorFakes) H19A_StopLoop(f, .5f); }
     if (!s_ambReady && s_ambAt >= 0 && now >= s_ambAt) {   // setup_airless_ambient_packages

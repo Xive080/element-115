@@ -157,6 +157,7 @@ static void H5P_CmdButtons(client_t *bot, usercmd_s *cmd)
     if (req && req != s_lastBotWeapon) s_pendingWeapon = (unsigned)req;
     s_lastBotWeapon = req;
     if (s_latchedWeapon) s_pendingWeapon = s_latchedWeapon;
+    { extern unsigned g_h5eWeapReq; if (g_h5eWeapReq) { s_pendingWeapon = g_h5eWeapReq; g_h5eWeapReq = 0; } }   // OLA E3a: guion "weap NOMBRE"
     if (held & H5IN_NEXTWEAPON && level.time - s_weapSelectTime >= 0)
     {
         const unsigned n = H5P_NextPrimary(ps, s_pendingWeapon ? s_pendingWeapon : ps->weapon);

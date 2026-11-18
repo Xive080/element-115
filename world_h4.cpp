@@ -421,6 +421,10 @@ static void InitInput(GfxWorld *w)
         R_SetInputCodeConstant(&g_in, CONST_SRC_CODE_SUN_SPECULAR, sun->specularColor[0], sun->specularColor[1], sun->specularColor[2], 1);
     }
     { extern void H7C_Fog(GfxCmdBufInput *, const float *) __attribute__((weak)); if (H7C_Fog) H7C_Fog(&g_in, g_vp.origin); }   // OLA 7c: niebla del original (R_SetFrameFog)
+    // OLA E3b: R_SetupLitConstants (r_draw_lit.cpp): mezcla del cielo (r_skyTransition), que usa el material del skybox (skycubemaphdr:
+    // Moon mezcla el cielo de la Tierra y el de la Luna con la transicion). Antes quedaba a 0. La matriz de color del cielo (constantes
+    // cambiables 44-46) la pone H7E_DrawSkybox en el estado de origen, como hace el backend del original.
+    if (r_skyTransition) R_SetInputCodeConstant(&g_in, CONST_SRC_CODE_SKY_TRANSITION, r_skyTransition->current.value, 0, r_treeScale ? r_treeScale->current.value : 0, r_testScale ? r_testScale->current.value : 0);
 }
 
 static float g_fovX7d = 90.0f;
@@ -466,6 +470,7 @@ static void RenderFrame(GfxWorld *w, const Cam &cam, int W, int H, float fovX, u
     float clr[4] = { 0.1f, 0.12f, 0.2f, 1 };
     R_ClearScreen(gfxCmdBufContext.state->prim.device, 3, clr, 1.0f, 0, 0);
     R_SetViewport(gfxCmdBufContext.state, &vpt);
+    { extern void H7E_DrawSkybox(unsigned char) __attribute__((weak)); if (H7E_DrawSkybox) H7E_DrawSkybox(techType); }   // OLA E3b: R_AddSkyboxModel, antes del mundo
     g_drawn = g_skipped = g_passes = 0;
     g_cw = w;
     { Frustum fr; float tx = tanf(fovX * 0.5f * (float)M_PI / 180.0f), ty = tx * (float)H / (float)W;

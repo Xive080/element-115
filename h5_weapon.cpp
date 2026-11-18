@@ -153,7 +153,10 @@ static void H5E_PlaceNearActor()
 //   tpsee TX TY TZ [R]       (OLA E1a) al punto con suelo mas cercano desde el que el ojo ve T a <= R (64), mirandolo
 //   tpsee TARGETNAME [R]     (OLA E1a) igual, con T = centro de los limites de la entidad mas cercana con ese targetname
 //   jump|melee|frag [MS]     (OLA E2b) mantiene salto (bit 10), cuchillo (bit 2) o granada letal (bit 14) MS ms (200/200/300)
+//   tact [MS]                (OLA E3a) mantiene el boton de la granada tactica (bit 15 del usercmd) MS (300) ms
+//   weap NOMBRE              (OLA E3a) cambia al arma NOMBRE si el jugador la tiene (como elegirla con weapnext)
 bool g_h5eViewResync = false;
+unsigned g_h5eWeapReq;   // OLA E3a: lo consume h5_play.cpp (H5P_CmdButtons)
 int g_h5eUseUntil, g_h5eFireUntil; bool g_h5eShotReq;
 int g_h5eBtnUntil[16];   // OLA E2b: jump/melee/frag MS del guion -> bit del usercmd (10 salto, 2 cuchillo, 14 granada)
 namespace {
@@ -227,6 +230,9 @@ void H5E_Timed()
         else if (!strcmp(cmd, "jump") || !strcmp(cmd, "melee") || !strcmp(cmd, "frag")) {   // OLA E2b
             int ms = !strcmp(cmd, "frag") ? 300 : 200; sscanf(ta.a.c_str(), "%*s %d", &ms);
             g_h5eBtnUntil[cmd[0] == 'j' ? 10 : cmd[0] == 'm' ? 2 : 14] = level.time + ms; }
+        else if (!strcmp(cmd, "weap")) { char wn[64] = ""; sscanf(ta.a.c_str(), "%*s %63s", wn); g_h5eWeapReq = (unsigned)BG_GetWeaponIndexForName(wn);   // OLA E3a: cambiar al arma
+            fprintf(stderr, "[H5E] guion: weap %s -> %u\n", wn, g_h5eWeapReq); }
+        else if (!strcmp(cmd, "tact")) { int ms = 300; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eBtnUntil[15] = level.time + ms; }   // OLA E3a: granada tactica (bit 15: agujero negro, munecas)
         else if (!strcmp(cmd, "shot")) g_h5eShotReq = true;
         else if (!strcmp(cmd, "usetn") && pl->r.inuse) {   // OLA S1: usetn TARGETNAME -> el trigger con ese targetname mas cercano recibe "trigger" del jugador
             char tn[96] = ""; sscanf(ta.a.c_str(), "%*s %95s", tn); gentity_s *best = nullptr; float bd = 1e30f;
@@ -408,8 +414,8 @@ static DObj *H5W_Update()
     for (int j = 0; j < 3; ++j) cg->viewModelAxis[3][j] = cg->refdef.vieworg[j];
     cg->xyspeed = sqrtf(ps->velocity[0] * ps->velocity[0] + ps->velocity[1] * ps->velocity[1]);
     if (ps->pm_type >= 9 || BG_GetViewmodelWeaponIndex(ps) <= 0) return nullptr;
+    { extern void H7C_UpdateHands(const playerState_s *) __attribute__((weak)); if (H7C_UpdateHands) H7C_UpdateHands(ps); }   // OLA 7c: CG_UpdateHandViewmodels (brazos del personaje); OLA E3b: antes de la animacion, como en el snapshot
     CG_UpdateViewWeaponAnim(0, first ? 1 : 0);
-    { extern void H7C_UpdateHands(const playerState_s *) __attribute__((weak)); if (H7C_UpdateHands) H7C_UpdateHands(ps); }   // OLA 7c: CG_UpdateHandViewmodels (brazos del personaje)
     cg->prevViewmodelWeapon = BG_GetViewmodelWeaponIndex(ps);   // CG_DrawActiveFrame lo guarda tras la animacion
     ViewModelInfo *vmi = CG_GetLocalClientViewModelInfo(0);
     DObj *obj = vmi->viewModelDObj;

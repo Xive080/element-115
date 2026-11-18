@@ -23,7 +23,10 @@
 //  - trampas de fuego: "f11"/"f10" y "f21"/"f20" = fire_trap_cosmo en sus script_struct sin modelo.
 //  - antenas de radar (RotateYaw 360 en 10 s sin fin) y level._effect["test_spin_fx"] para las luces giratorias de _lights.csc.
 //  - sonido: snd_play_auto_fx de 11 tipos de FX, alarmas del gantry tras "power_on" (evt_alarm_a / evt_alarm_b_loop), minis/minie.
-// No se hace (anotado en docs/evidencia/m9/LEEME.md): Earthquake (el harness no tiene sacudida de camara), PlayRumbleOnEntity (sin
+//  - OLA E3a: sacudidas de cliente (Earthquake de los .csc): lander_rumble_and_quake (bandera 7 del jugador: al subir una, luego cada
+//    0,1 s segun la distancia al lander, y al aterrizar dos mas) y el grito de Samantha ("sia", 0,4 durante 10 s). Agujero negro (Gersh)
+//    en maps/h19_weap_black_hole_bomb.cpp (comun con Moon); aqui solo su vision zombie_black_hole (prioridad 10, 2 s).
+// No se hace (anotado en docs/evidencia/m9/LEEME.md): PlayRumbleOnEntity (sin
 // vibracion), snd_set_snapshot del grito de Samantha, soul_pull de la bandera 0 de actor (level.nml_spark_pull no esta en los datos, el
 // original tambien falla), barreras electricas de No Man's Land (nml_build_sparks no estan en los datos y el servidor no manda eb+),
 // ojos de mono (level._effect["eye_glow"]: el port no pinta ojos por script) y los aviones/cohetes de fondo (comentados en el original).
@@ -67,6 +70,8 @@ const char *H19_ModelTn(int j);
 const char *H19_ModelName(int j);
 bool H19_ModelGet(int j, float *org, float *ang);
 void H19_ModelPose(int j, const float *org, const float *ang);
+int H19_BhbInside();   // OLA E3a: maps/h19_weap_black_hole_bomb.cpp
+void H5FX_Earthquake(float scale, float seconds, const float *org, float radius) __attribute__((weak));   // h5_fx.cpp: Earthquake() de cliente
 
 namespace {
 const char kName[] = "Ascension";
@@ -89,6 +94,12 @@ bool Quoted(const std::string &t, size_t p, std::string &out, size_t *end = null
 }
 float RandRange(float a, float b) { return a + (b - a) * H19_Rand01(); }   // randomfloatrange del CSC
 int RandInt(int n) { int r = (int)(H19_Rand01() * n); return r >= n ? n - 1 : r; }   // randomint(n)
+int s_quakes;
+void Quake(float scale, float sec, const float *org, float radius)   // player Earthquake() del CSC (OLA E3a; sin H5FX_Earthquake no hace nada)
+{
+    if (!H5FX_Earthquake || !org) return;
+    H5FX_Earthquake(scale, sec, org, radius); ++s_quakes;
+}
 
 // ---- tareas con espera (los wait/realwait de los hilos del CSC)
 struct Task { int at; std::function<void(int)> fn; };
@@ -642,7 +653,7 @@ struct LanderFx { unsigned eng[5], status, steam[2]; std::vector<unsigned> cfLig
 std::map<int, LanderFx> s_ent;   // por entnum
 std::map<int, unsigned> s_moverFl;
 std::map<int, int> s_moverUse;
-int s_flagEvents;
+int s_flagEvents, s_landerQuake = -1, s_landerQuakeT;
 void CentrifugeLightsOff(int n, int now)   // centrifuge_warning_lights_off: wait 0.2 y borra los modelos de las luces (y sus FX)
 {
     std::vector<unsigned> v; v.swap(s_ent[n].cfLights);
@@ -663,7 +674,19 @@ void MoverFlag(int n, gentity_s *e, int bit, bool set, int now)
     case 2: Detach(L.status); L.status = Attach(set ? "lander_red" : "lander_green", n, "tag_origin"); break;   // lander_status_light
     case 3: Detach(L.status); L.status = Attach(set ? "panel_red" : "panel_green", n, "tag_home"); break;        // launch_panel_centrifuge_status
     case 4: case 5: case 6: if (set) { ++s_rocketNum; RocketDisplay(); } break;   // launch_panel_*_status
-    case 7: if (!set && L.grounds) { L.grounds = false; QSnd(2, 40 + (n & 7), nullptr, nullptr, 2); } break;   // lander_rumble_and_quake -> end_ground_sounds (sin sacudida)
+    case 7: {   // lander_rumble_and_quake (sin vibracion: PlayRumbleOnEntity no esta en el harness)
+        gentity_s *pl = &g_entities[0];
+        if (set) {
+            if (pl->r.inuse) Quake(RandRange(0.2f, 0.3f), RandRange(2.0f, 2.5f), pl->r.currentOrigin, 150);   // al llamar al lander
+            s_landerQuake = n; s_landerQuakeT = now;   // do_lander_rumble_quake: cada 0,1 s mientras vuela (QuakeFrame)
+        } else {
+            if (L.grounds) { L.grounds = false; QSnd(2, 40 + (n & 7), nullptr, nullptr, 2); }   // end_ground_sounds
+            Quake(RandRange(0.3f, 0.4f), RandRange(0.5f, 0.6f), e->r.currentOrigin, 150);   // al aterrizar
+            float o[3]; memcpy(o, e->r.currentOrigin, 12);
+            After(now + 600, [o](int) { Quake(RandRange(0.1f, 0.2f), RandRange(0.2f, 0.3f), o, 150); });
+            s_landerQuake = -1;   // level notify stop_lander_rumble
+        }
+        break; }
     case 9: if (set) LanderMarker(now); break;   // lander_move_fx
     case 11: {   // centrifuge_warning_lights_init: apaga las que haya y, con la bandera, luces arriba, chispas abajo y vapor al segundo
         CentrifugeLightsOff(n, now);
@@ -691,6 +714,17 @@ void MoverFlag(int n, gentity_s *e, int bit, bool set, int now)
         break;
     default: break;   // 8 = vibracion de la centrifuga (sin vibracion en el harness), 10 = bomba de agujero negro (comun)
     }
+}
+void QuakeFrame(int now)   // do_lander_rumble_quake
+{
+    if (s_landerQuake < 0 || now - s_landerQuakeT < 100) return;
+    s_landerQuakeT = now;
+    gentity_s *e = &g_entities[s_landerQuake], *pl = &g_entities[0];
+    if (!e->r.inuse || !pl->r.inuse) return;
+    float d2 = 0; for (int k = 0; k < 3; ++k) d2 += (pl->r.currentOrigin[k] - e->r.currentOrigin[k]) * (pl->r.currentOrigin[k] - e->r.currentOrigin[k]);
+    if (d2 > 1500.0f * 1500.0f) return;
+    if (d2 > 750.0f * 750.0f) Quake(RandRange(0.1f, 0.15f), RandRange(0.15f, 0.16f), e->r.currentOrigin, 1000);
+    else Quake(RandRange(0.15f, 0.2f), RandRange(0.15f, 0.16f), e->r.currentOrigin, 750);
 }
 void LanderGroundSound(int n, gentity_s *e)   // start_ground_sounds: bucle en el suelo bajo tag_bellow + 30
 {
@@ -758,7 +792,9 @@ void Notify(const std::string &ev, int now)
     else if (ev == "monkey_start") { VisionApply("zombie_cosmodrome_monkey", 4); FogApply("monkey", 3); fprintf(stderr, "[H19] %s: ronda de monos t=%d\n", kName, now); }
     else if (ev == "monkey_stop") { VisionRemove("zombie_cosmodrome_monkey"); FogRemove("monkey"); fprintf(stderr, "[H19] %s: fin de la ronda de monos t=%d\n", kName, now); }
     else if (ev == "MRS") QSnd(0, -1, nullptr, "zmb_ape_intro_sonicboom_fnt");   // cosmodrome_monkey_round_start_listener (sin sacudida)
-    else if (ev == "sia") {   // samantha_is_angry_earthquake_and_rumbles (sin sacudida, vibracion ni snapshot)
+    else if (ev == "sia") {   // samantha_is_angry_earthquake_and_rumbles (sin vibracion ni snapshot)
+        if (g_entities[0].r.inuse) Quake(0.4f, 10.0f, g_entities[0].r.currentOrigin, 150);   // self Earthquake(.4, 10, self.origin, 150)
+        fprintf(stderr, "[H19] %s: Samantha enfadada (sia): sacudida 10 s y vision nopower t=%d\n", kName, now);
         VisionApply("zombie_cosmodrome_nopower", 8);
         After(now + 6000, [](int) { VisionRemove("zombie_cosmodrome_nopower", 3.0f); });
     }
@@ -846,7 +882,12 @@ void Frame(int now)
         else if (e.first == "box_indicator") TvSwitch(e.second, now);
     }
     RunTasks(now);
+    {   // OLA E3a: black_hole_visionset_switch (maps/h19_weap_black_hole_bomb.cpp): zombie_black_hole prioridad 10, 2 s al entrar y al salir
+        static int bh = 0; const int in = H19_BhbInside();
+        if (in != bh) { bh = in; if (in) VisionApply("zombie_black_hole", 10, 2.0f); else VisionRemove("zombie_black_hole", 2.0f); }
+    }
     MoversFrame(now);
+    QuakeFrame(now);
     PlayerFrame();
     TvFrame(now);
     LScreensFrame(now);
@@ -885,8 +926,8 @@ void AudioFrame(bool)
 }
 void AudioStatus(std::string &out)
 {
-    char b[240]; snprintf(b, sizeof b, "; %s: bucles auto %d, sonidos %d, puertas %d, banderas %d, exploders %d, trampas %d, pantallas %d, escombros %d, cohete %d",
-        kName, s_autoFx, s_sndPlays, s_doorMoves, s_flagEvents, s_expOn, s_trapOn, s_tvSwitches, s_debrisN, s_rocketNum);
+    char b[320]; snprintf(b, sizeof b, "; %s: bucles auto %d, sonidos %d, puertas %d, banderas %d, exploders %d, trampas %d, pantallas %d, escombros %d, cohete %d, sacudidas %d",
+        kName, s_autoFx, s_sndPlays, s_doorMoves, s_flagEvents, s_expOn, s_trapOn, s_tvSwitches, s_debrisN, s_rocketNum, s_quakes);
     out += b;
 }
 #endif

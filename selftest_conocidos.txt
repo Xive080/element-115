@@ -24,12 +24,5 @@ in destructible file [dest_opel_blitz] model [dest_opel_blitz_full]
 There were errors when building fast file 'zombie_moon'
 Couldn't find material 'sun_flare_icbm'
 zmb_gersh_device has missing occlusion
-# OLA M10 (Moon): huevo (zombie_moon_sq, etapa ctvg): las placas de Cassimir son script_struct con "model" que nadie precachea; SetModel tras la carga da
-# script runtime error y corta solo el hilo del huevo (pendiente: ver si el SP original precachea el "model" de los structs). Las lineas de la pila
-# ("called from"/"started from"/separadores) son el detalle de ese error de script, igual que [HNG-ERRORES].
-model 'p_zom_moon_cassimir_plate' not precached
-[ERROR] called from:
-[ERROR] started from:
-[ERROR] ************************************
 # OLA S1: con H5_DEV=1 (solo pruebas con devgui) el original ejecuta devgui_zombie.cfg, que no viene en los datos del usuario (benigno, como devgui_fx)
 [ERROR] couldn't exec devgui_zombie

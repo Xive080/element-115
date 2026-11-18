@@ -155,7 +155,8 @@ void H7C_UpdateHands(const playerState_s *ps)
     for (int slot = 0; slot < 15; ++slot) {
         const unsigned w = ps->heldWeapons[slot].weapon; if (!w) continue;
         weaponInfo_s *wi = CG_GetLocalClientWeaponInfo(0, w);
-        if (!wi->registered || wi->handModel == hands) continue;
+        if (!wi->registered) CG_RegisterWeapon(0, w);   // OLA E3b: como CG_UpdateWeaponViewmodels antes que las manos; un arma recien dada sin
+        if (wi->handModel == hands) continue;            // handXModel (equip_gasmask_zm) llegaba a ChangeViewmodelDobj con manos nulas
         ChangeViewmodelDobj(0, ps, w, BG_GetPlayerWeaponModel(ps, w), hands, wi->gogglesModel, wi->rocketModel, 1, 0);
         if (said != hands) { said = hands; fprintf(stderr, "[H7C] brazos del viewmodel: '%s' (viewmodelIndex %d)\n", name, ps->viewmodelIndex); }
     }

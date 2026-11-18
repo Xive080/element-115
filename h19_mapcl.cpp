@@ -152,8 +152,10 @@ void H19_AIFootFx(const float *pos, const char *surf, bool onFire)
     if (s_stepQ.size() >= 64) s_stepQ.erase(s_stepQ.begin());   // sin frame de render no crece
     StepQ q; memcpy(q.pos, pos, 12); q.surf = onFire ? "fire" : (surf ? surf : ""); s_stepQ.push_back(q);
 }
+void H19_BhbFrame();   // OLA E3a: maps/h19_weap_black_hole_bomb.cpp (bomba de agujero negro, comun a Ascension y Moon)
 void H19_FootFxFrame()
 {
+    H19_BhbFrame();
     for (const StepQ &q : s_stepQ) {
         auto it = s_stepFx.find(q.surf); if (it == s_stepFx.end()) continue;
         float f[3] = { q.pos[0], q.pos[1], q.pos[2] + 100.0f }, ang[3];

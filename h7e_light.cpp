@@ -11,6 +11,8 @@
 #include <qcommon/cm_load_obj.h>
 #include <qcommon/cm_load.h>
 #include <DynEntity/DynEntity_client.h>
+#include <gfx_d3d/r_foliage.h>   // OLA E3b: R_SetCodeConstant
+#include <gfx_d3d/r_dvars.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -578,6 +580,10 @@ void H7E_ClientFrame()
         fprintf(stderr, "[H7E] H7E_POWER: interruptor %s en t=%d\n", found ? "pulsado" : "NO encontrado", now);
     }
 }
+// OLA E3b: modelos de cliente sin el tope de 1200 u (el original dibuja hasta el plano lejano infinito): la Tierra de Moon a 128000 u
+static std::vector<char> s_farModel;
+static bool j_far(long j) { return j >= 0 && j < (long)s_farModel.size() && s_farModel[j]; }
+void H19_ModelFar(int j, bool far) { if (j < 0) return; if ((int)s_farModel.size() <= j) s_farModel.resize(j + 1, 0); s_farModel[j] = far; }
 void H7E_PrepareClientModels()
 {
     if (!s_on || s_models.empty() || !H5L_Prepare) return;
@@ -585,9 +591,40 @@ void H7E_PrepareClientModels()
     static const float half[3] = { 16, 16, 16 };
     for (auto &m : s_models) {
         const float dx = m.org[0] - cam[0], dy = m.org[1] - cam[1], dz = m.org[2] - cam[2], d = sqrtf(dx * dx + dy * dy + dz * dz), r = m.m->radius + 8.0f;
-        m.vis = d - r <= 1200.0f && (d <= r || dx * fwd[0] + dy * fwd[1] + dz * fwd[2] >= 0.3f * d - r);   // mismo tope de distancia que los smodels
+        const bool far = j_far(&m - s_models.data());   // OLA E3b: sin tope de distancia (Tierra de Moon, skybox): el original no lo tiene
+        m.vis = (far || d - r <= 1200.0f) && (d <= r || dx * fwd[0] + dy * fwd[1] + dz * fwd[2] >= 0.3f * d - r);   // mismo tope de distancia que los smodels
         if (m.vis && m.key >= 0) H5L_Prepare(m.key, m.org, half, false);   // CG_General: R_AddDObjToScene con lightingOrigin = origen
     }
+}
+// OLA E3b: R_AddSkyboxModel (r_skybox.cpp): el world->skyBoxModel del mapa se dibuja en el ojo, y con el las superficies "sky" del BSP
+// se omiten (R_AddBspDrawSurfs, flag 4; el arnes ya las omitia, asi que sin esto esos mapas no tenian cielo). Su tecnica (p. ej.
+// skycubemaphdr) proyecta con la VIEW_PROJECTION sin traslacion (dp3) sobre la posicion LOCAL del modelo: vertices sin trasladar y
+// dibujado antes que el mundo, como el orden "sky" del original. H7E_SKYBOX=0 lo apaga.
+void H7E_DrawSkybox(unsigned char techType)
+{
+    static const bool on = !(getenv("H7E_SKYBOX") && !atoi(getenv("H7E_SKYBOX")));
+    static const GfxWorld *forWorld; static XModel *sky; static std::vector<std::vector<GfxPackedVertex>> verts;
+    if (!on || !rgp.world) return;
+    if (forWorld != rgp.world) {
+        forWorld = rgp.world; sky = nullptr; verts.clear();
+        const char *n = rgp.world->skyBoxModel.get();
+        if (n && *n) sky = DB_FindXAssetHeader(ASSET_TYPE_XMODEL, (char *)n, 0, -1).model;
+        if (sky) { const int nb = XModelNumBones(sky); XSurface *xs; const int ns = XModelGetSurfaces(sky, &xs, 0);
+            DObjSkelMat *skel = nullptr; if (nb > 128 || posix_memalign((void **)&skel, 16, (nb ? nb : 1) * sizeof(DObjSkelMat))) { sky = nullptr; return; }
+            for (int b = 0; b < nb; ++b) { memset(&skel[b], 0, sizeof skel[b]); skel[b].axis[0][0] = skel[b].axis[1][1] = skel[b].axis[2][2] = 1.0f; skel[b].origin[3] = 1.0f; }
+            verts.resize(ns);
+            for (int s = 0; s < ns; ++s) if (xs[s].vertCount) { verts[s].resize(xs[s].vertCount); R_SkinXSurfaceSkinned(&xs[s], skel, verts[s].data()); }
+            free(skel);
+            fprintf(stderr, "[H7E] skybox '%s': %d superficies en el ojo (R_AddSkyboxModel)\n", n, ns); }
+    }
+    if (!sky) return;
+    XSurface *xs; const int ns = XModelGetSurfaces(sky, &xs, 0); PTR32(Material) *skins = XModelGetSkins(sky, 0);
+    // matriz de color del cielo (colorTempMatrix de r_skyColorTemp): COLOR_MATRIX_R/G/B son constantes "cambiables" de pixel; el
+    // original las pone en el estado de origen (R_SetupLitConstants, R_SetCodeConstant), no en la entrada del frame
+    if (r_skyColorTemp) { float cm[4][4]; colorTempMatrix(cm, r_skyColorTemp->current.value);
+        for (int c = 0; c < 3; ++c) R_SetCodeConstant(gfxCmdBufContext.source, (CodeConstant)(CONST_SRC_CODE_COLOR_MATRIX_R + c), cm[0][c], cm[1][c], cm[2][c], cm[3][c]); }
+    for (int s = 0; s < ns && s < (int)verts.size(); ++s) { Material *mtl = skins ? skins[s].get() : nullptr;
+        if (mtl && !verts[s].empty()) H4_DrawSkinnedSurf(mtl, &xs[s], verts[s].data(), techType); }
 }
 void H7E_DrawClientModels(unsigned char techType)
 {
