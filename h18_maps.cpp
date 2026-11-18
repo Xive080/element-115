@@ -85,6 +85,8 @@ static std::string MapFile() { return s_base + "/players/bo1_map.txt"; }
 const char *H18_DefaultMap() { return kDefaultMap; }
 const char *H18_Map() { return s_map.empty() ? kDefaultMap : s_map.c_str(); }
 const char *H18_MapDir() { return s_dir.c_str(); }
+const char *H18_BaseDir() { return s_base.c_str(); }                                                  // OLA U1 (h21_menu.cpp): players/ y .iwd de la base
+bool H18_MapPlayable(const char *zone) { return Find(zone) && !PickDir(zone).empty(); }             // OLA U1: datos completos instalados
 
 // al principio de main / bo1_engine_main, antes de leer P3_GAMEDATA o el config
 void H18_ResolveBoot(int argc, char **argv)

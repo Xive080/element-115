@@ -256,6 +256,9 @@ int main(int argc, char **argv)
     // 5. resto de zonas como H0 (common_zombie; los en_ si existen)
     LoadFF((G + "Common/common_zombie.ff").c_str());
     LoadFF((G + "english/en_common_zombie.ff").c_str());
+#ifdef H5G
+    { extern int (*g_h21Frontend)(int, int); if (getenv("H5_GAME") && g_h21Frontend) { const int r = g_h21Frontend(W, H); if (r >= 0) return r; } }   // OLA U1: menu principal (H21_MENU=1, h21_menu.cpp)
+#endif
 
     if (getenv("H5_VM") || getenv("H5_GAME")) {   // H5a0: VM GSC original aislada (h5_vm.cpp); H5_MAP = zona del mapa con los _zombiemode*.gsc
         const char *hm = getenv("H5_MAP"); if (!hm) hm = H18_DefaultMap();   // OLA M0: lo fija H18_ResolveBoot (menu de mapas / H5_MAP / defecto)

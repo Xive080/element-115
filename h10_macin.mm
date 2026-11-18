@@ -33,7 +33,9 @@ static int MapKey(NSEvent *e)
 }
 static void Pos(NSEvent *e, float *fx, float *fy)
 {
-    NSView *v = e.window.contentView; NSPoint p = e.locationInWindow; NSSize s = v.bounds.size;
+    NSWindow *w = e.window; NSPoint p = e.locationInWindow;
+    if (!w) { w = NSApp.windows.firstObject; if (w) p = [w convertPointFromScreen:p]; }   // OLA U1: eventos enviados al proceso (pruebas H10_MANUAL=2) llegan sin ventana, en coordenadas de pantalla
+    NSView *v = w.contentView; NSSize s = v.bounds.size;
     *fx = s.width > 0 ? (float)(p.x / s.width) : 0; *fy = s.height > 0 ? (float)(1.0 - p.y / s.height) : 0;
 }
 
@@ -150,7 +152,9 @@ extern "C" void H10_MacInputInstall(H10Ev ev)
         case NSEventTypeLeftMouseDown: Pos(e, &fx, &fy); s_ev(1, fx, fy, 0); break;
         case NSEventTypeLeftMouseUp: Pos(e, &fx, &fy); s_ev(2, fx, fy, 0); break;
         case NSEventTypeScrollWheel: if (e.scrollingDeltaY != 0) s_ev(3, 0, 0, e.scrollingDeltaY > 0 ? 1 : -1); break;
-        case NSEventTypeKeyDown: if (!e.isARepeat) s_ev(4, 0, 0, MapKey(e)); return nil;   // sin pitido
+        case NSEventTypeKeyDown: if (!e.isARepeat) s_ev(4, 0, 0, MapKey(e));   // sin pitido
+            if (e.characters.length && !(e.modifierFlags & NSEventModifierFlagCommand)) { const unichar c = [e.characters characterAtIndex:0]; if (c >= 32 && c < 127) s_ev(6, 0, 0, c); }   // OLA U1: caracter escrito (mayusculas y signos, para el nombre)
+            return nil;
         case NSEventTypeKeyUp: s_ev(5, 0, 0, MapKey(e)); return nil;
         case NSEventTypeRightMouseDown: case NSEventTypeRightMouseUp: case NSEventTypeRightMouseDragged: case NSEventTypeOtherMouseDragged: case NSEventTypeFlagsChanged: return s_manual ? nil : e;
         default: break;
