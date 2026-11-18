@@ -8,6 +8,8 @@
 //   H11_MAXPLAYERS=n    jugadores en total, incluido el local (1..4, 4 por defecto) -> sv_maxclients
 //   H11_NAME=texto      nombre de la partida en la lista de cercanas (por defecto "Partida"; nada del usuario ni del equipo)
 // Simulacion de red (en el proceso que envia): H11_LOSS=pct (perdida), H11_LAG=ms (retardo fijo), H11_JITTER=ms (retardo aleatorio extra).
+// SOLO RED LOCAL (OLA C1): no se envia ni se acepta nada fuera de las redes privadas (10/8, 172.16/12, 192.168/16, 169.254/16 enlace
+// local, 127/8) y el broadcast; no hay resolucion de nombres (sin DNS: solo IPv4 numerica). Ni internet, ni Tailscale, ni servidores.
 // Seguridad: solo los comandos fuera de banda del protocolo de conexion pasan al servidor (getchallenge, connect y el sondeo de la
 // lista h11info); rcon, voz, steamauth y el resto se descartan. Limite de ritmo por direccion para los fuera de banda, tamano maximo
 // de paquete, tope de paquetes por frame y lista blanca de comandos de cliente remotos (g_h0ClientCmdFilter, sv_client_mp.cpp).
@@ -26,7 +28,8 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <netdb.h>
+#include <net/if.h>
+#include <ifaddrs.h>
 #undef in_addr
 #undef inet_addr
 #include <fcntl.h>
@@ -35,6 +38,7 @@
 #include <errno.h>
 #include <time.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <deque>
@@ -101,12 +105,59 @@ static void SinToNetadr(const sockaddr_in &s, netadr_t *a)
     memset(a, 0, sizeof *a); a->type = NA_IP; memcpy(a->ip, &s.sin_addr.s_addr, 4); a->port = s.sin_port; a->addrHandleIndex = -1;
 }
 
+// OLA C1: direcciones de la red local. Lo demas (internet, CGNAT 100.64/10 de Tailscale, multicast global) no se usa nunca.
+bool H11_IsLocalIp(const unsigned char *ip)
+{
+    return ip[0] == 10 || ip[0] == 127 || (ip[0] == 169 && ip[1] == 254) || (ip[0] == 172 && (ip[1] & 0xF0) == 0x10) || (ip[0] == 192 && ip[1] == 168);
+}
+static bool H11_IsLocalSin(const sockaddr_in &s) { return H11_IsLocalIp((const unsigned char *)&s.sin_addr.s_addr) || s.sin_addr.s_addr == htonl(INADDR_BROADCAST); }
+
+// OLA C1: broadcast de descubrimiento por CADA interfaz de red local (Wi-Fi, Ethernet, punto de acceso, Wi-Fi Direct, PAN Bluetooth):
+// macOS manda 255.255.255.255 solo por la interfaz principal, y en un movil con punto de acceso y Wi-Fi a la vez hay dos subredes.
+// Se envia a la direccion de broadcast de cada interfaz IPv4 privada activa, a 255.255.255.255 y a 127.0.0.1 (dos procesos en un equipo).
+// fd = socket UDP con SO_BROADCAST. Devuelve cuantos destinos se intentaron.
+int H11_SendDiscovery(int fd, const void *data, size_t len, int port)
+{
+    if (fd < 0) return 0;
+    sockaddr_in to[18]; int n = 0;
+    auto add = [&](unsigned int beAddr) {
+        for (int i = 0; i < n; ++i) if (to[i].sin_addr.s_addr == beAddr) return;
+        if (n >= 18) return;
+        memset(&to[n], 0, sizeof to[n]); to[n].sin_family = AF_INET; to[n].sin_port = htons((unsigned short)port); to[n].sin_addr.s_addr = beAddr; ++n;
+    };
+    ifaddrs *ifs = nullptr;
+    if (getifaddrs(&ifs) == 0)
+    {
+        for (ifaddrs *i = ifs; i; i = i->ifa_next)
+        {
+            if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !(i->ifa_flags & IFF_UP) || (i->ifa_flags & IFF_LOOPBACK)) continue;
+            const sockaddr_in *a = (const sockaddr_in *)i->ifa_addr;
+            if (!H11_IsLocalIp((const unsigned char *)&a->sin_addr.s_addr)) continue;   // solo interfaces de red privada
+            if ((i->ifa_flags & IFF_BROADCAST) && i->ifa_broadaddr && i->ifa_broadaddr->sa_family == AF_INET) add(((const sockaddr_in *)i->ifa_broadaddr)->sin_addr.s_addr);
+            else if (i->ifa_netmask && i->ifa_netmask->sa_family == AF_INET)
+                add(a->sin_addr.s_addr | ~((const sockaddr_in *)i->ifa_netmask)->sin_addr.s_addr);
+        }
+        freeifaddrs(ifs);
+    }
+    add(htonl(INADDR_BROADCAST)); add(htonl(INADDR_LOOPBACK));
+    int sent = 0;
+    for (int i = 0; i < n; ++i) if (sendto(fd, data, len, 0, (const sockaddr *)&to[i], sizeof to[i]) >= 0) { ++sent; g_h11Stats.bytesOut += len; ++g_h11Stats.pktsOut; }
+    return n;
+}
+int H11_EngineSocket() { return s_sock; }
+
 // win_net.cpp Sys_SendPacket (rama kcod4): solo NA_IP / NA_BROADCAST por el socket IP.
 char __cdecl Sys_SendPacket(unsigned int length, unsigned __int8 *data, netadr_t to)
 {
     if (to.type != NA_IP && to.type != NA_BROADCAST) { fprintf(stderr, "[H11] Sys_SendPacket: tipo de direccion %d no soportado\n", (int)to.type); return 0; }
     if (s_sock < 0) return 1;   // como el original sin socket: no es error
     sockaddr_in s; NetadrToSin(to, &s);
+    if (!H11_IsLocalSin(s))   // OLA C1: nunca fuera de la red local
+    {
+        ++g_h11Stats.pktsRejected;
+        static int logged; if (logged++ < 4) { const unsigned char *b = (const unsigned char *)&s.sin_addr.s_addr; fprintf(stderr, "[H11] envio a %u.%u.%u.%u bloqueado: no es una direccion de la red local\n", b[0], b[1], b[2], b[3]); }
+        return 1;
+    }
     H11_SimInit();
     if (s_simLoss > 0 && rand() % 100 < s_simLoss) { ++g_h11Stats.pktsDroppedSim; return 1; }
     if (s_simLag > 0 || s_simJitter > 0)
@@ -138,6 +189,7 @@ int __cdecl Sys_GetPacket(netadr_t *net_from, msg_t *net_message)
         if (r < 0) return 0;   // EWOULDBLOCK: no hay mas
         g_h11Stats.bytesIn += (unsigned long long)r; ++g_h11Stats.pktsIn;
         if (r >= cap || r < 4 || from.sin_family != AF_INET) { ++g_h11Stats.pktsRejected; continue; }   // demasiado grande o runt
+        if (!H11_IsLocalIp((const unsigned char *)&from.sin_addr.s_addr)) { ++g_h11Stats.pktsRejected; continue; }   // OLA C1: solo la red local
         SinToNetadr(from, net_from);
         net_message->cursize = (int)r; net_message->readcount = 0; net_message->bit = 0; net_message->overflowed = 0;
         if (s_oobHook && *(const unsigned int *)net_message->data == 0xFFFFFFFFu && s_oobHook(*net_from, net_message->data, (int)r)) continue;
@@ -146,13 +198,14 @@ int __cdecl Sys_GetPacket(netadr_t *net_from, msg_t *net_message)
     return 0;
 }
 
-// win_net.cpp Sys_StringToAdr: nombre o IPv4 a netadr_t (sin puerto: lo pone NET_StringToAdr).
+// win_net.cpp Sys_StringToAdr: IPv4 NUMERICA a netadr_t (sin puerto: lo pone NET_StringToAdr). OLA C1: sin resolucion de nombres (el
+// original llamaba a gethostbyname: DNS hacia fuera); "localhost" es 127.0.0.1. Solo direcciones de la red local.
 int __cdecl Sys_StringToAdr(const char *s, netadr_t *a)
 {
-    addrinfo hints; memset(&hints, 0, sizeof hints); hints.ai_family = AF_INET; hints.ai_socktype = SOCK_DGRAM;
-    addrinfo *res = nullptr;
-    if (getaddrinfo(s, nullptr, &hints, &res) != 0 || !res) return 0;
-    sockaddr_in sin = *(sockaddr_in *)res->ai_addr; freeaddrinfo(res);
+    sockaddr_in sin; memset(&sin, 0, sizeof sin); sin.sin_family = AF_INET;
+    if (!I_stricmp(s, "localhost")) sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    else if (inet_pton(AF_INET, s, &sin.sin_addr) != 1) return 0;
+    if (!H11_IsLocalSin(sin)) { fprintf(stderr, "[H11] %s no es una direccion de la red local: rechazada\n", s); return 0; }
     SinToNetadr(sin, a); a->port = 0;
     return 1;
 }
@@ -163,15 +216,14 @@ void __cdecl NET_Sleep(unsigned int msec)
     pollfd p = { s_sock, POLLIN, 0 }; poll(&p, 1, (int)msec);
 }
 
-// win_net.cpp Sys_IsLANAddress(_IgnoreSubnet): redes privadas como el original y ademas 100.64/10 (CGNAT: Tailscale), que es
-// red privada cifrada de baja latencia. En LAN el servidor manda snapshots sin la ventana de tasa (sv_snapshot_mp.cpp).
+// win_net.cpp Sys_IsLANAddress(_IgnoreSubnet): redes privadas como el original (OLA C1: sin 100.64/10, Tailscale descartado; todo lo
+// que llega ya es de la red local). En LAN el servidor manda snapshots sin la ventana de tasa (sv_snapshot_mp.cpp).
 int __cdecl Sys_IsLANAddress(netadr_t adr)
 {
     if (adr.type == NA_LOOPBACK || adr.type == NA_BOT) return 1;
     if (adr.type != NA_IP) return 0;
     const unsigned char *ip = adr.ip;
-    return ip[0] == 10 || ip[0] == 127 || (ip[0] == 169 && ip[1] == 254) || (ip[0] == 172 && (ip[1] & 0xF0) == 0x10) || (ip[0] == 192 && ip[1] == 168)
-        || (ip[0] == 100 && (ip[1] & 0xC0) == 0x40);
+    return H11_IsLocalIp(ip);
 }
 
 // q_shared.cpp BigShort (TU no compilada): orden de red de los puertos (NET_StringToAdr, NET_AdrToString).
@@ -179,6 +231,13 @@ __int16 __cdecl BigShort(__int16 l) { return (__int16)(((unsigned short)l >> 8) 
 
 // Perfil de fuera de banda del cliente (cl_net_chan_mp.cpp, TU no compilada): sin perfilado de red en el harness.
 void __cdecl CL_Netchan_AddOOBProfilePacket(int, int) {}
+// OLA C1: funciones de TUs no compiladas que el servidor llama SOLO con clientes remotos de verdad (con H0_STUB_SOFT se veian como
+// [STUBSOFT]; sin el, el stub abortaba la partida del anfitrion al primer snapshot o al irse un jugador):
+//  - traza de medida del mod (cgame/cg_sp_nettrace.cpp, dvar bo1_nettrace, apagada por defecto): sin efecto;
+//  - Steam (live/live_steam_server.cpp, win32/win_steam.cpp): no hay Steam ni cuentas; desconectar no tiene nada que avisar.
+void CG_SP_NetTraceServerSnap(const client_t *) {}
+void __cdecl LiveSteam_Server_ClientSteamDisconnect(unsigned __int64) {}
+void Steam_OnClientDropped(uint64_t) {}
 
 // ---------------------------------------------------------------------------------------------------------------
 // SERVIDOR: bomba de paquetes con filtro. Sustituye a Com_ServerPacketEvent (common.cpp) con la misma ruta: Sys_GetPacket -> SV_PacketEvent.
@@ -212,6 +271,8 @@ static void H11_OobVerb(const unsigned char *d, int len, char *out, int outSize)
 
 static bool s_hostOn;
 static unsigned char *s_svBuf;
+static bool H11_LateJoinBlocked(const netadr_t &from);
+int H11_ConnectedPlayers();
 void H11_ServerPump()
 {
     if (!s_hostOn || !com_sv_running || !com_sv_running->current.enabled) return;
@@ -232,6 +293,15 @@ void H11_ServerPump()
                 continue;
             }
             if (m.cursize > 1100) { ++g_h11Stats.pktsRejected; continue; }   // connect lleva un userinfo de <1024
+            if (H11_LateJoinBlocked(from))
+            {
+                // OLA C1: con sala de espera, solo se entra ANTES de empezar (como el original: no hay entrada a partida empezada; el que
+                // entraba tarde aparecia en (0,0,0) sin puntos y sin poder disparar). Una reconexion desde la misma IP si se deja.
+                ++g_h11Stats.pktsRejected;
+                if (!I_stricmp(verb, "getchallenge")) NET_OutOfBandPrint(NS_SERVER, from, "error\nEXE_SERVERISFULL");
+                if (g_h11Stats.oobRejectLog < 8) { ++g_h11Stats.oobRejectLog; fprintf(stderr, "[H11] %s de %s rechazado: la partida ya empezo\n", verb, NET_AdrToString(from)); }
+                continue;
+            }
         }
         else if (m.cursize < 10) { ++g_h11Stats.pktsRejected; continue; }   // secuencia + qport + serverId + 2 largos como minimo
         SV_PacketEvent(from, &m);
@@ -263,11 +333,12 @@ static bool H11_HostOob(const netadr_t &from, const unsigned char *d, int len)
     char verb[32]; H11_OobVerb(d, len, verb, sizeof verb);
     if (I_stricmp(verb, "h11info")) return false;
     if (!H11_RateOk(from)) return true;
-    int players = 0;
-    for (int i = 0; i < com_maxclients->current.integer; ++i) if (svs.clients[i].header.state >= CS_CONNECTED) ++players;
+    const int players = H11_ConnectedPlayers();
     char name[40]; { const char *n = getenv("H11_NAME"); snprintf(name, sizeof name, "%s", n && *n ? n : "Partida"); for (char *c = name; *c; ++c) if (*c == '\\' || *c == '"' || *c == '\n' || (unsigned char)*c < 32) *c = ' '; }
     const char *map = sv_mapname ? sv_mapname->current.string : "?";
-    NET_OutOfBandPrint(NS_SERVER, from, va("h11infoResponse \\proto\\1044\\name\\%s\\map\\%s\\players\\%d\\max\\%d\\port\\%d", name, map, players, s_maxPlayers, s_boundPort));
+    // lobby 1 = sala de espera (se puede entrar y aparecer con los demas); 0 = partida empezada (el que entra espera a la ronda siguiente)
+    extern int H11_WaitingFor();
+    NET_OutOfBandPrint(NS_SERVER, from, va("h11infoResponse \\proto\\1044\\name\\%s\\map\\%s\\players\\%d\\max\\%d\\port\\%d\\lobby\\%d", name, map, players, s_maxPlayers, s_boundPort, H11_WaitingFor() ? 1 : 0));
     return true;
 }
 
@@ -325,6 +396,18 @@ static void H11_HostFrame()
         next += 1000.0 / 60.0;
     }
     H11_ServerPump(); H11_HostLog();
+    // OLA C1: siendo anfitrion el menu no congela la partida (en red no hay pausa: los demas siguen jugando, y en la sala el servidor tiene
+    // que seguir atendiendo conexiones y conectar al jugador local). h5_play.cpp no corre
+    // SV_Frame con g_h5pPause; aqui se corre con el tiempo real transcurrido (el jugador local se queda quieto mientras mira el menu).
+    extern bool g_h5pPause;
+    static double lastReal = 0, acc = 0;
+    const double now = H11_NowMs(); double dt = lastReal > 0 ? now - lastReal : 0; lastReal = now; if (dt > 100) dt = 100;
+    if (g_h5pPause)
+    {
+        acc += dt; const int msec = (int)acc; acc -= msec;
+        if (msec > 0) { SV_Frame(0, msec); void H8_Frame(); H8_Frame(); }
+    }
+    else acc = 0;
 }
 
 // Sala de espera (H11_WAIT=N jugadores en total, incluido el local): el GSC de zombies coloca a todos en los "initial_spawn_points" una
@@ -356,13 +439,30 @@ static int H11_ExpectedPlayers()
     return s_waitN;
 }
 void H11_StartNow() { s_startNow = true; }
+// jugadores conectados o conectando (incluido el local), para la sala y la lista de partidas
+int H11_ConnectedPlayers()
+{
+    if (!com_maxclients) return 0;
+    int n = 0; for (int i = 0; i < com_maxclients->current.integer && i < 32; ++i) n += svs.clients[i].header.state >= CS_CONNECTED;
+    return n;
+}
+static bool H11_LateJoinBlocked(const netadr_t &from)
+{
+    if (s_waitN <= 1 || !s_started) return false;   // sin sala (pruebas con H11_WAIT=1): como antes
+    for (int i = 0; i < com_maxclients->current.integer && i < 32; ++i)
+        if (svs.clients[i].header.state != CS_FREE && !svs.clients[i].bIsTestClient && !memcmp(svs.clients[i].header.netchan.remoteAddress.ip, from.ip, 4)) return false;   // reconexion
+    return true;
+}
 int H11_WaitingFor() { return s_started || s_waitN <= 1 ? 0 : s_waitN; }
-// Antes de main: el GSC empieza a contar jugadores en cuanto carga el mapa (antes de H5P_Run/H11_Install).
-static struct H11EarlyInit { H11EarlyInit() {
-    const char *h = getenv("H11_HOST"); if (!h || !atoi(h)) return;
+// Antes de cargar el mapa: el GSC empieza a contar jugadores en cuanto carga (antes de H5P_Run/H11_Install). Se llama antes de main
+// (variables de prueba) y otra vez desde el arranque (h11_lobby.cpp: partida creada en el menu, players/bo1_net.txt).
+void H11_ApplyHostEnv()
+{
+    const char *h = getenv("H11_HOST"); if (!h || !atoi(h)) { s_waitN = 1; g_h0ExpectedPlayersHook = nullptr; return; }
     s_waitN = EnvInt("H11_WAIT", 1); if (s_waitN > 4) s_waitN = 4;
-    if (s_waitN > 1) g_h0ExpectedPlayersHook = H11_ExpectedPlayers;
-} } s_h11EarlyInit;
+    g_h0ExpectedPlayersHook = s_waitN > 1 ? H11_ExpectedPlayers : nullptr;
+}
+static struct H11EarlyInit { H11EarlyInit() { const char *h = getenv("H11_HOST"); if (h && atoi(h)) H11_ApplyHostEnv(); } } s_h11EarlyInit;
 
 // Se llama desde H5P_Run (h5_play.cpp) antes del bucle: el servidor ya existe (SV_SpawnServer hecho).
 void H11_Install()

@@ -7,7 +7,8 @@
 //   H11_CONNECT=ip[:puerto]   direccion del anfitrion (IP de la red local, del punto de acceso o de Tailscale; puerto 3074 por defecto)
 //   H11_NAME=texto            nombre del jugador (por defecto "Jugador")
 //   H11C_SECONDS=s            duracion de la prueba (60); al acabar se desconecta limpio ("disconnect" fiable, como CL_Disconnect)
-//   H11C_SCRIPT=0|1|2         0 quieto | 1 (por defecto) anda, gira y dispara | 2 igual y ademas se corta 5 s a mitad y RECONECTA
+//   H11C_SCRIPT=0|1|2|3       0 quieto | 1 (por defecto) anda, gira y dispara | 2 igual y ademas se corta 5 s a mitad y RECONECTA
+//                             | 3 (OLA C1) apunta al zombi mas cercano del snapshot y dispara (para ver que el remoto suma puntos)
 //   H11C_NODELTA=1            pide snapshots completos (sin delta); por defecto delta como el original (cl_nodelta 0)
 //   H11_LOSS / H11_LAG / H11_JITTER: simulacion de red al enviar (h11_net.cpp)
 // Registro [H11C] cada segundo: estado, snapshots, tiempo de servidor, posicion/salud/municion del playerState recibido, RTT, KB/s.
@@ -23,6 +24,7 @@
 #include <client_mp/sv_client_mp.h>
 #include <server_mp/sv_init_mp.h>
 #include <bgame/bg_public.h>
+#include <universal/com_math.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,10 +32,13 @@
 #include <string>
 #include <vector>
 #include "h11_net.h"
+extern "C" int getpid(void);
 #include <stdarg.h>
 
 int Sys_GetPacket(netadr_t *net_from, msg_t *net_message);   // h11_net.cpp
 void NET_Sleep(unsigned int msec);
+int H11_SendDiscovery(int fd, const void *data, size_t len, int port);   // h11_net.cpp (OLA C1)
+int H11_EngineSocket();
 
 extern int g_entNumBits;   // game_mp/g_main_mp.cpp
 void Com_InitDvars();
@@ -69,6 +74,7 @@ struct H11Client
     int cmdServerTime = 0;
     // estadistica
     double rttMs = -1, rttSent = 0; int rttN = 0; double rttSum = 0;
+    int aimFrames = 0; double reloadUntil = 0;
 };
 
 H11Client C;
@@ -95,12 +101,19 @@ void HandleOob(const netadr_t &from, msg_t *m)
     char line[1024]; const char *s = MSG_ReadStringLine(m, line, sizeof line);
     Cmd_TokenizeString((char *)s);
     const char *c = Cmd_Argv(0);
+    // "error\nEXE_ERR_QPORT" mientras conectamos = el anfitrion ya nos tiene (se perdio su connectResponse y el
+    // reintento de connect choca con nuestro propio hueco): seguimos como si hubiera llegado connectResponse.
+    char why[256] = "";
+    const bool isError = !I_stricmp(c, "error") || !I_strnicmp(s, "error", 5);
+    if (isError) MSG_ReadStringLine(m, why, sizeof why);
+    const bool alreadyIn = isError && C.state == H11C_CONNECTING && strstr(why, "EXE_ERR_QPORT");
+    if (alreadyIn) Log("el anfitrion ya nos tiene (connectResponse perdido): seguimos");
     if (!I_stricmp(c, "challengeResponse") && C.state == H11C_CHALLENGING)
     {
         C.challenge = atoi(Cmd_Argv(1)); C.state = H11C_CONNECTING; C.lastOob = -1e9; C.tries = 0;
         Log("challengeResponse %d", C.challenge);
     }
-    else if (!I_stricmp(c, "connectResponse") && C.state == H11C_CONNECTING)
+    else if ((alreadyIn || !I_stricmp(c, "connectResponse")) && C.state == H11C_CONNECTING)
     {
         C.outBuf.assign(0x20000, 0); C.inBuf.assign(0x20000, 0);
         Netchan_Setup(NS_CLIENT1, &C.chan, C.server, C.qport, C.outBuf.data(), (int)C.outBuf.size(), C.inBuf.data(), (int)C.inBuf.size());
@@ -108,9 +121,9 @@ void HandleOob(const netadr_t &from, msg_t *m)
         C.lastSend = 0; C.lastPacketRealtime = H11_NowMs();
         Log("connectResponse: conectado en %.0f ms (netchan qport %d)", H11_NowMs() - C.connectStart, C.qport);
     }
-    else if (!I_stricmp(c, "error") || !I_strnicmp(s, "error", 5))
+    else if (isError)
     {
-        Log("el servidor rechaza: %s", s + (strlen(s) > 6 ? 6 : 0));
+        Log("el servidor rechaza: %s", *why ? why : s);
     }
     else if (!I_stricmp(c, "disconnect"))
     {
@@ -396,7 +409,32 @@ void MakeCmd(double tActive)
     if (st <= C.cmdServerTime) st = C.cmdServerTime + 1;
     C.cmdServerTime = c.serverTime = st;
     const int mode = getenv("H11C_SCRIPT") ? atoi(getenv("H11C_SCRIPT")) : 1;
-    if (mode >= 1 && C.state == H11C_ACTIVE)
+    if (mode == 3 && C.state == H11C_ACTIVE && C.havePs)
+    {
+        // OLA C1: apunta al zombi (ET_ACTOR) mas cercano del ULTIMO SNAPSHOT y dispara a rafagas (flancos: pistola semiautomatica).
+        // Solo produce lo que daria un jugador (angulos y botones del usercmd); los aciertos, el dano y los puntos los decide el servidor.
+        const entityState_s *best = nullptr; float bd = 1e30f;
+        for (int i = 0; i < s_cur.numEntities; ++i)
+        {
+            const entityState_s *e = &s_parseEnts[(s_cur.parseEntitiesNum + i) & (H11_PARSE_ENTITIES - 1)];
+            if (e->eType != ET_ACTOR) continue;
+            float d = 0; for (int j = 0; j < 3; ++j) { const float t = e->lerp.pos.trBase[j] - C.ps.origin[j]; d += t * t; }
+            if (d < bd) { bd = d; best = e; }
+        }
+        if (best && bd < 1500.0f * 1500.0f)
+        {
+            float dir[3] = { best->lerp.pos.trBase[0] - C.ps.origin[0], best->lerp.pos.trBase[1] - C.ps.origin[1], best->lerp.pos.trBase[2] + 40.0f - (C.ps.origin[2] + 60.0f) }, ang[3];
+            vectoangles(dir, ang);
+            // PM_UpdateViewAngles: vista = SHORT2ANGLE(cmd) + delta_angles -> el usercmd lleva la vista menos delta_angles
+            s_pitch = AngleNormalize180(ang[0] - C.ps.delta_angles[0]); s_yaw = AngleNormalize180(ang[1] - C.ps.delta_angles[1]);
+            if (fmod(tActive, 0.2) < 0.1 && tActive >= C.reloadUntil) c.button_bits.setBit(0u);
+            ++C.aimFrames;
+        }
+        // cargador vacio: suelta el gatillo, pulsa +reload 0,3 s (flanco, como un toque) y espera 2 s a que acabe la recarga
+        if (C.ps.weapon && C.ps.ammoInClip[0].count == 0 && tActive >= C.reloadUntil) C.reloadUntil = tActive + 2.3;
+        if (tActive < C.reloadUntil - 2.0) c.button_bits.setBit(5u);
+    }
+    else if (mode >= 1 && C.state == H11C_ACTIVE)
     {
         const double ph = fmod(tActive, 8.0);
         if (ph < 3.0) c.forwardmove = 127;                   // anda 3 s
@@ -414,7 +452,10 @@ void SendOob(const char *s) { NET_OutOfBandPrint(NS_CLIENT1, C.server, s); }
 void StartConnect()
 {
     C.state = H11C_CHALLENGING; C.lastOob = -1e9; C.tries = 0; C.connectStart = H11_NowMs();
-    C.qport = 1 + (rand() & 0x7FFE);
+    // qport distinto por proceso: dos clientes en la misma maquina (misma IP) con el mismo qport chocan en
+    // SV_DirectConnect (EXE_ERR_QPORT). rand() sin semilla daba el mismo a todos.
+    unsigned seed = (unsigned)getpid() * 2654435761u ^ (unsigned)(H11_NowMs() * 1000.0);
+    C.qport = 1 + (int)((seed ^ (seed >> 15)) % 0x7FFE);
     C.havePs = false; C.lastSnapServerTime = 0; C.cmdServerTime = 0; C.lastSnapMessageNum = -1;
 }
 
@@ -434,13 +475,12 @@ void Disconnect(const char *why)
 // Tailscale no reenvia broadcast: ahi va la IP 100.x a mano (H11_CONNECT=100.x.y.z), sin cambiar nada del protocolo.
 int H11C_List()
 {
-    netadr_t bc; memset(&bc, 0, sizeof bc); bc.type = NA_BROADCAST; bc.port = BigShort((__int16)H11_DefaultPort());
-    netadr_t lo; NET_StringToAdr(va("127.0.0.1:%d", H11_DefaultPort()), &lo);
-    const double t0 = H11_NowMs(); double last = -1e9; int found = 0;
+    static const char probe[] = "\xff\xff\xff\xffh11info";
+    const double t0 = H11_NowMs(); double last = -1; int found = 0;
     std::vector<std::string> seen;
     while (H11_NowMs() - t0 < 2500)
     {
-        if (H11_NowMs() - last > 800) { NET_OutOfBandPrint(NS_CLIENT1, bc, "h11info"); NET_OutOfBandPrint(NS_CLIENT1, lo, "h11info"); last = H11_NowMs(); }
+        if (H11_NowMs() - last > 800) { const int nd = H11_SendDiscovery(H11_EngineSocket(), probe, sizeof probe - 1, H11_DefaultPort()); if (last < 0) Log("sondeo por %d destino(s) de la red local", nd); last = H11_NowMs(); }
         msg_t m; netadr_t from;
         MSG_Init(&m, s_rx, sizeof s_rx);
         while (Sys_GetPacket(&from, &m))
@@ -462,7 +502,7 @@ int H11C_List()
                         char name[64], map[64], pl[8], mx[8];
                         I_strncpyz(name, Info_ValueForKey(info, "name"), sizeof name); I_strncpyz(map, Info_ValueForKey(info, "map"), sizeof map);
                         I_strncpyz(pl, Info_ValueForKey(info, "players"), sizeof pl); I_strncpyz(mx, Info_ValueForKey(info, "max"), sizeof mx);
-                        Log("partida '%s' en %s: mapa %s, jugadores %s/%s (%.0f ms)", name, key, map, pl, mx, H11_NowMs() - last);
+                        Log("partida '%s' en %s: mapa %s, jugadores %s/%s, %s (%.0f ms)", name, key, map, pl, mx, atoi(Info_ValueForKey(info, "lobby")) ? "en sala" : "empezada", H11_NowMs() - last);
                     }
                 }
             }
@@ -552,9 +592,16 @@ int H11C_Run()
             const double kin = (g_h11Stats.bytesIn - lastIn) / 1024.0 / dt, kout = (g_h11Stats.bytesOut - lastOut) / 1024.0 / dt;
             lastIn = g_h11Stats.bytesIn; lastOut = g_h11Stats.bytesOut;
             if (C.havePs)
-                Log("t=%.0f s estado %d snaps/s %d t_servidor %d | ps pos (%.1f,%.1f,%.1f) yaw %.1f salud %d arma %d municion %d | RTT %.1f ms | %.1f KB/s entrada, %.1f KB/s salida",
+            {
+                // OLA C1: lo que el snapshot dice del resto (zombis/jugadores) y los puntos propios (clientState_s.score del snapshot)
+                int actors = 0, players = 0, score = -1, others = 0;
+                for (int i = 0; i < s_cur.numEntities; ++i) { const int t = s_parseEnts[(s_cur.parseEntitiesNum + i) & (H11_PARSE_ENTITIES - 1)].eType; actors += t == ET_ACTOR; players += t == ET_PLAYER; }
+                for (int i = 0; i < s_cur.numClients; ++i) { const clientState_s *cs = &s_parseClients[(s_cur.parseClientsNum + i) & (H11_PARSE_CLIENTS - 1)]; if (cs->clientIndex == C.clientNum) score = cs->score.score; else ++others; }
+                Log("t=%.0f s estado %d snaps/s %d t_servidor %d | ps pos (%.1f,%.1f,%.1f) yaw %.1f salud %d arma %d municion %d | puntos %d | snapshot: %d zombis, %d jugadores, %d clientes mas%s | RTT %.1f ms | %.1f KB/s entrada, %.1f KB/s salida",
                     (now - t0) / 1000.0, (int)C.state, C.snaps, C.lastSnapServerTime, C.ps.origin[0], C.ps.origin[1], C.ps.origin[2], C.ps.viewangles[1],
-                    C.ps.stats[0], C.ps.weapon, C.ps.weapon ? C.ps.ammoInClip[0].count : 0, C.rttMs, kin, kout);
+                    C.ps.stats[0], C.ps.weapon, C.ps.weapon ? C.ps.ammoInClip[0].count : 0, score, actors, players, others, C.aimFrames ? " | apuntando" : "", C.rttMs, kin, kout);
+                C.aimFrames = 0;
+            }
             else
                 Log("t=%.0f s estado %d snaps/s %d t_servidor %d | RTT %.1f ms | %.1f KB/s entrada, %.1f KB/s salida", (now - t0) / 1000.0, (int)C.state, C.snaps,
                     C.lastSnapServerTime, C.rttMs, kin, kout);

@@ -92,6 +92,7 @@ void H18_ResolveBoot(int argc, char **argv)
     s_argc = argc; s_argv = argv;
     const char *b = getenv("BO1_GAMEDATA_BASE"); if (!b) b = getenv("P3_GAMEDATA"); s_base = b ? b : "../../gamedata";
     setenv("BO1_GAMEDATA_BASE", s_base.c_str(), 1);   // un relanzamiento (cambio de mapa en el Mac) parte de la misma base
+    { extern void (*g_h11ResolveBoot)(const char *, int, char **); if (g_h11ResolveBoot) g_h11ResolveBoot(s_base.c_str(), argc, argv); }   // OLA C1: partida local (players/bo1_net.txt, h11_lobby.cpp)
     if (const char *r = getenv("BO1_MAPS")) s_root = r;
     else if (IsDir(s_base + "/../gamedata_maps")) s_root = s_base + "/../gamedata_maps";
     const char *h5 = getenv("H5_MAP"), *p4 = getenv("P4_MAP");
@@ -281,6 +282,7 @@ static std::string Upper(const char *s)
     }
     return o;
 }
+const char *H18_MapName(const char *zone) { static std::string n; const H18Map *m = Find(zone); n = Upper(m ? m->name : zone); return n.c_str(); }   // OLA C1 (h11_lobby.cpp)
 // estado de cada mapa para el menu y el registro
 struct MapState { const H18Map *m; std::string dir; int missing; bool playable, current; };
 static std::vector<MapState> States()

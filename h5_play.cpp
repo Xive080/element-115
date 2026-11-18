@@ -303,7 +303,11 @@ static void H5P_PilotServerFrame()
     s_pilotHave = false;
     if (!pl || !s_active) return;
     usercmd_s c = me->lastUsercmd;
-    if (!G_SP_HeadlessFightCommand(me, &c)) return;
+    // Su traza de bala puede dar en otro jugador (co-op): G_DObjCalcPose -> G_PlayerController lee bgs, nulo fuera de G_RunFrame.
+    bgs_t *const prevBgs = bgs; bgs = &level_bgs;
+    const bool fight = G_SP_HeadlessFightCommand(me, &c);
+    bgs = prevBgs;
+    if (!fight) return;
     const playerState_s *ps = &pl->client->ps;
     s_pilotCmd = c; s_pilotHave = true;
     s_pilotAng[0] = AngleNormalize180((float)(unsigned short)c.angles[0] * (360.0f / 65536.0f) + ps->delta_angles[0]);
