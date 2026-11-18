@@ -254,3 +254,13 @@ void H5L_Install()
         fprintf(stderr, "[H5L] luces primarias: %d ninguna, %d sol, %d focos, %d omni (%d sin GfxLightDef)\n", n[0], n[1], n[2], n[3], nodef);
     }
 }
+
+// OLA M5: Byte4PackRgba de cg_scr_main.cpp (TU de CSC sin compilar). El servidor la usa en SP_light (g_misc_mp.cpp) con las luces
+// primarias con spawnflags 0x10 (luz de script) que trae Shi No Numa; sin ella el stub abortaba al cargar el mapa. Mismo calculo.
+void __cdecl Byte4PackRgba(const float *from, unsigned char *to)
+{
+    for (int k = 0; k < 4; ++k) {
+        const int v = (int)((float)(255.0 * from[k]) + 9.313225746154785e-10);
+        to[k] = (unsigned char)(v < 255 ? (v > 0 ? v : 0) : 255);
+    }
+}
