@@ -721,7 +721,17 @@ static void Cmd_H10VidRestart()
 void (*g_h10QuitApp)();             // la app Android: cerrar la actividad
 // pausedmenu: "Restart level" (fast_restart) y "Quit" (disconnect). El motor no es reentrante: en Android se relanza la app (partida nueva)
 // o se cierra; en el Mac (arnes) se cierra el proceso si hay ventana y si no solo se registra.
-static void Cmd_H10FastRestart() { fprintf(stderr, "[H10] fast_restart: partida nueva%s\n", g_h10RestartApp ? " (reinicio la app)" : " (en el arnes: sin efecto)"); CfgSave(); if (g_h10RestartApp) g_h10RestartApp(); }
+#ifdef H0_MACWIN
+extern "C" bool H10_MacRelaunch();   // OLA P1 (h10_macin.mm): juego a mano en el Mac, relanza el proceso con los mismos argumentos
+#endif
+static void Cmd_H10FastRestart()
+{
+    fprintf(stderr, "[H10] fast_restart: partida nueva%s\n", g_h10RestartApp ? " (reinicio la app)" : " (en el arnes: relanza si se juega a mano, si no sin efecto)"); CfgSave();
+    if (g_h10RestartApp) g_h10RestartApp();
+#ifdef H0_MACWIN
+    else H10_MacRelaunch();
+#endif
+}
 static void Cmd_H10Disconnect()
 {
     fprintf(stderr, "[H10] disconnect: salir del juego\n"); CfgSave();
