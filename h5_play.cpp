@@ -586,8 +586,13 @@ int H5P_Run(int maxFrames, bool view)
             // viewmodel por frame de render: camara interpolada y tiempo de servidor interpolado (cg.time entre snapshots)
             memcpy(g_h5wViewOrg, camOrg, 12); memcpy(g_h5wViewAng, camAng, 12);
             g_h5wViewTime = s_curTime >= 0 ? s_curTime - (int)(1000 / sv_fps->current.integer) + (int)lrintf(H5P_Frac() * (1000.0f / sv_fps->current.integer)) : level.time;
+            float shakeAng[3]; memcpy(shakeAng, camAng, 12);   // OLA E2a: Earthquake() del GSC (CG_ShakeCamera) solo en el dibujo, no en la entrada
+            extern bool H5FX_ShakeCamera(const float *, float *, int) __attribute__((weak));   // h5_fx.cpp (H5FX=1)
+            const bool shaken = H5FX_ShakeCamera && H5FX_ShakeCamera(camOrg, shakeAng, g_h5wViewTime);
+            if (shaken) { memcpy(g_h5wViewAng, shakeAng, 12); H4_SetCam(camOrg, shakeAng); }
             g_h5vSkinMs = g_h5vDrawMs = 0;
             const double r0 = NowMs(); H4_Frame(); const double r1 = NowMs();
+            if (shaken) H4_SetCam(camOrg, camAng);
             if (g_h5vActors > 0) { skinSum += g_h5vSkinMs; drawSum += g_h5vDrawMs; frameSum += r1 - r0; svSum += s1 - s0; ++nMeasured; if (g_h5vSkinMs > skinMax) skinMax = g_h5vSkinMs; if (g_h5vActors > maxActors) maxActors = g_h5vActors; }
             { extern bool g_h5eShotReq; if (g_h5eShotReq) { g_h5eShotReq = false; s_fShotNow = true; } }   // OLA M1: H5_TIMED shot
             if (s_active && ((shotEvery > 0 && s_scriptT >= nextShot) || (s_fShotNow && eventShots)))

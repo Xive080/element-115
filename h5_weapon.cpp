@@ -171,7 +171,7 @@ void H5E_Timed()
         ta.done = true;
         char cmd[32] = ""; sscanf(ta.a.c_str(), "%31s", cmd);
         gentity_s *pl = &g_entities[0];
-        if (!strcmp(cmd, "dvar")) { char k[96] = "", v[256] = ""; if (sscanf(ta.a.c_str(), "%*s %95s %255[^\n]", k, v) >= 1) { if (!Dvar_FindVar(k)) fprintf(stderr, "[H5E] guion: la dvar %s no existe\n", k); else Dvar_SetFromStringByName(k, v); } }
+        if (!strcmp(cmd, "dvar")) { char k[96] = "", v[256] = ""; if (sscanf(ta.a.c_str(), "%*s %95s %255[^\n]", k, v) >= 1) { if (!Dvar_FindVar(k)) { fprintf(stderr, "[H5E] guion: la dvar %s no existe: se crea (set)\n", k); Dvar_SetCommand(k, v); } else Dvar_SetFromStringByName(k, v); } }   // OLA E2a: set crea (cheat_sq)
         else if (!strcmp(cmd, "tp") && pl->r.inuse && pl->client) { float o[3], a[3] = { 0, 0, 0 }; if (sscanf(ta.a.c_str(), "%*s %f %f %f %f %f", &o[0], &o[1], &o[2], &a[1], &a[0]) >= 4) { TeleportPlayer(pl, o, a); g_h5eViewResync = true; } }
         else if (!strcmp(cmd, "tpl") && pl->r.inuse && pl->client) {   // tpl X Y Z TX TY TZ: al suelo bajo (X,Y,Z) mirando al punto T
             float o[3], tg[3]; if (sscanf(ta.a.c_str(), "%*s %f %f %f %f %f %f", &o[0], &o[1], &o[2], &tg[0], &tg[1], &tg[2]) == 6) {

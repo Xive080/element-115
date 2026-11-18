@@ -44,6 +44,7 @@
 #include <EffectsCore/fx_unique_handle.h>
 #include <qcommon/cm_trace.h>
 #include <qcommon/cm_load.h>
+#include <server/sv_world.h>
 #ifdef H6SND
 #include <sound/snd_bank.h>
 #include <sound/snd_public_async.h>
@@ -625,19 +626,154 @@ void ActorsFrame(int now)
 }
 
 // ---- clientflags de scriptmover del servidor (register_clientflag_callback "scriptmover")
+void SauceFlags(int n, gentity_s *e, unsigned fl, unsigned prev, int now);   // OLA E2a (abajo)
 std::map<int, unsigned> s_moverFl;
 void MoversFrame(int now)
 {
     for (int n = 0; n < level.num_entities; ++n) {
         gentity_s *e = &g_entities[n];
         if (!e->r.inuse || e->s.eType != ET_SCRIPTMOVER) { s_moverFl.erase(n); continue; }
-        const unsigned fl = e->s.lerp.eFlags2 & ((1u << 3) | (1u << 4));
+        const unsigned fl = e->s.lerp.eFlags2 & ((1u << 3) | (1u << 4) | (0xFu << 6));
         auto it = s_moverFl.find(n); const unsigned prev = it == s_moverFl.end() ? 0 : it->second;
         if (it != s_moverFl.end() && fl == prev) continue;
         s_moverFl[n] = fl;
         if ((fl ^ prev) & (1u << 3)) SpikeTrap(n, e->r.currentOrigin, fl & (1u << 3), now);
         if ((fl ^ prev) & (1u << 4)) MazeWall(n, e->r.currentOrigin, fl & (1u << 4), now);
+        if ((fl ^ prev) & (0xFu << 6)) SauceFlags(n, e, fl, prev, now);   // OLA E2a
     }
+}
+
+// ---- OLA E2a: FX de la cadena de Shangri-La que se mueven: crystal_trail_runner (cf 6/7/8 del scriptmover) y water_trail_monitor (cf 9)
+struct Trail { unsigned h; const FxEffectDef *def; float a[3], b[3]; int t0, dur, slot, ent, killAt; };
+std::vector<Trail> s_trails;
+struct SauceStart { bool on; std::string fx; float org[3]; } s_sauceStart; bool s_sauceEndOn; float s_sauceEnd[3];
+int s_trailSlot = 300, s_sauceRuns, s_waterTrails;
+Trail NewTrail(const char *key, const float *org, const float *ang)   // spawn(tag_origin) + PlayFXOnTag(level._effect[key], "tag_origin")
+{
+    Trail t{}; memcpy(t.a, org, 12); memcpy(t.b, org, 12); t.ent = -1; t.killAt = -1;
+    auto it = s_effect.find(key); if (it == s_effect.end()) return t;
+    t.h = H19_PlayFxAng(it->second.c_str(), org, ang);
+#ifdef H5FX
+    t.def = FX_Register((char *)it->second.c_str());
+#endif
+    return t;
+}
+void PlaceTrail(Trail &t, const float *org, const float *ang)   // el efecto va en el tag_origin, que se mueve
+{
+#ifdef H5FX
+    if (!fx_systemPool || !t.h || !t.def) return;
+    FxEffectContainer *c = UniqueHandleToEffect(&FX_GetSystem(0)->system, t.h);
+    if (!c || c->effect.def != t.def) { t.h = 0; return; }
+    float ax[3][3]; AnglesToAxis(ang, ax); memcpy(c->effect.frameNow.origin, org, 12); AxisToQuat(ax, c->effect.frameNow.quat);
+#else
+    (void)t; (void)org; (void)ang;
+#endif
+}
+void SauceMonitor(int now)   // crystal_sauce_monitor: con inicio y fin definidos lanza el runner y los olvida
+{
+    if (!s_sauceStart.on || !s_sauceEndOn) return;
+    static const float zero[3] = { 0, 0, 0 };
+    Trail t = NewTrail(s_sauceStart.fx.c_str(), s_sauceStart.org, zero);
+    memcpy(t.b, s_sauceEnd, 12); t.t0 = now; t.dur = 500; t.slot = s_trailSlot++;   // MoveTo(dest, 0.5) sin aceleracion
+    QSnd(1, t.slot, t.a, "evt_sq_bag_crystal_bounce_loop", 0.05f);
+    fprintf(stderr, "[H19] %s: %s de (%.0f,%.0f,%.0f) a (%.0f,%.0f,%.0f) t=%d\n", kName, s_sauceStart.fx.c_str(), t.a[0], t.a[1], t.a[2], t.b[0], t.b[1], t.b[2], now);
+    s_trails.push_back(t); ++s_sauceRuns;
+    s_sauceStart.on = s_sauceEndOn = false;
+}
+void TrailsFrame(int now)
+{
+    static const float zero[3] = { 0, 0, 0 };
+    for (size_t i = 0; i < s_trails.size();) {
+        Trail &t = s_trails[i];
+        if (t.ent >= 0) {   // LinkTo(self, "tag_origin"): sigue al scriptmover; Delete 1.2 s despues de quitar el flag
+            gentity_s *e = &g_entities[t.ent];
+            if (e->r.inuse) PlaceTrail(t, e->r.currentOrigin, e->r.currentAngles);
+            if (t.killAt >= 0 && now >= t.killAt) { H19_KillFx(t.h); s_trails.erase(s_trails.begin() + i); continue; }
+        } else {
+            const float f = t.dur > 0 ? std::min(1.0f, (float)(now - t.t0) / (float)t.dur) : 1.0f; float o[3];
+            for (int k = 0; k < 3; ++k) o[k] = t.a[k] + (t.b[k] - t.a[k]) * f;
+            PlaceTrail(t, o, zero); QSnd(3, t.slot, o, nullptr);
+            if (f >= 1.0f) { H19_KillFx(t.h); QSnd(2, t.slot, nullptr, nullptr, 0); s_trails.erase(s_trails.begin() + i); continue; }   // waittill movedone; Delete
+        }
+        ++i;
+    }
+}
+void SauceFlags(int n, gentity_s *e, unsigned fl, unsigned prev, int now)
+{
+    const unsigned on = fl & ~prev, off = prev & ~fl;
+    if (on & ((1u << 6) | (1u << 7))) {   // crystal_weaksauce_start / crystal_hotsauce_start: origin + (0,0,134)
+        s_sauceStart.on = true; s_sauceStart.fx = (on & (1u << 7)) ? "fx_hot_sauce_trail" : "fx_weak_sauce_trail";
+        memcpy(s_sauceStart.org, e->r.currentOrigin, 12); s_sauceStart.org[2] += 134.0f;
+    }
+    if (on & (1u << 8)) {   // crystal_sauce_end: +134 solo si el modelo es el cristal con soporte
+        memcpy(s_sauceEnd, e->r.currentOrigin, 12); s_sauceEndOn = true;
+        const char *m = e->model ? SL_ConvertToString(G_ModelName(e->model), SCRIPTINSTANCE_SERVER) : nullptr;
+        if (m && !strcmp(m, "p_ztem_crystal_and_holder")) s_sauceEnd[2] += 134.0f;
+    }
+    if (on & (1u << 9)) {   // water_trail_monitor(set)
+        Trail t = NewTrail("fx_crystal_water_trail", e->r.currentOrigin, e->r.currentAngles); t.ent = n; s_trails.push_back(t); ++s_waterTrails;
+        fprintf(stderr, "[H19] %s: estela de agua del cristal (ent %d) t=%d\n", kName, n, now);
+    }
+    if (off & (1u << 9)) for (Trail &t : s_trails) if (t.ent == n && t.killAt < 0) t.killAt = now + 1200;   // delete_water_trail
+}
+
+// ---- OLA E2a: sq_std_watcher (pinchos de la etapa "std" en los sq_sad) y waterfall_watcher (chorros 120+i)
+struct StdSlot { bool have; float org[3], ang[3]; int model; int status; };
+StdSlot s_std[4]; bool s_stdOn; int s_stdSpikes, s_wfGush;
+void StdInit()
+{
+    for (const H19Kv &k : H19_MapEnts()) {
+        const char *tn = H19_Str(k, "targetname"), *si = H19_Str(k, "script_int");
+        if (!tn || strcmp(tn, "sq_sad") || !si) continue;
+        const int i = atoi(si) - 1; if (i < 0 || i >= 4) continue;
+        StdSlot &d = s_std[i]; d.have = H19_Vec(k, "origin", d.org); if (!H19_Vec(k, "angles", d.ang)) d.ang[0] = d.ang[1] = d.ang[2] = 0; d.model = -1; d.status = 0;
+    }
+}
+void StdHide(StdSlot &d)   // Delete() del script_model de cliente: no hay borrado en h7e, se manda bajo el mundo
+{
+    if (d.model < 0) return; float o[3] = { d.org[0], d.org[1], -100000.0f }; H19_ModelPose(d.model, o, d.ang);
+}
+void StdNotify(const std::string &ev, int now)
+{
+    if (ev == "SR") {   // sq_std_watcher / sq_std_watch_for_restart: estados a 0 y pinchos fuera
+        s_stdOn = true; for (StdSlot &d : s_std) { d.status = 0; StdHide(d); }
+        fprintf(stderr, "[H19] %s: etapa std (re)iniciada t=%d\n", kName, now);
+    } else if (s_stdOn && ev.size() == 2 && ev[0] == 'S' && ev[1] >= '1' && ev[1] <= '4') {   // sq_std_struct_watcher: "S"+script_int
+        StdSlot &d = s_std[ev[1] - '1']; if (!d.have) return;
+        d.status = 1;
+        if (d.model < 0) d.model = H19_AddModel("p_ztem_spikemore_spike", d.org, d.ang, "sq_std_spike"); else H19_ModelPose(d.model, d.org, d.ang);
+        ++s_stdSpikes; fprintf(stderr, "[H19] %s: pincho %s en (%.0f,%.0f,%.0f) modelo %d t=%d\n", kName, ev.c_str(), d.org[0], d.org[1], d.org[2], d.model, now);
+    } else if (ev == "WF") {   // waterfall_watcher: los sq_sad aun sin pincho echan agua, de 0.25 en 0.25 s
+        fprintf(stderr, "[H19] %s: trampa de la cascada (WF) t=%d\n", kName, now);
+        if (!s_stdOn) return;   // _sq_std_status sin definir hasta el primer SR
+        for (int i = 0; i < 4; ++i) { if (s_std[i].status == 0) { ExploderNum(120 + i, true, now + 250 * i); ++s_wfGush; } }
+    }
+}
+
+// ---- OLA E2a: player_napalm_radius_overlay_fade (_zombiemode_ai_napalm.csc): r_flameScaler por distancia al Napalm cada 0.1 s
+float s_flamePrev; int s_flameNext;
+void NapalmOverlay(int now)
+{
+    if (now < s_flameNext) return; s_flameNext = now + 100;
+    gentity_s *pl = &g_entities[0]; if (!pl->r.inuse || !pl->client) return;
+    float frac = 0;
+    for (auto &a : s_act) {
+        if (!a.second.napalm) continue;   // level.napalm_zombie
+        gentity_s *z = &g_entities[a.first];
+        if (a.second.wet) break;
+        const float eye[3] = { pl->client->ps.origin[0], pl->client->ps.origin[1], pl->client->ps.origin[2] + pl->client->ps.viewHeightCurrent };
+        trace_t tr; memset(&tr, 0, sizeof tr); G_LocationalTrace(&tr, eye, z->r.currentOrigin, 0, 1, nullptr, nullptr);   // bullettrace(..., false, self): sin personajes
+        if (tr.fraction < 0.85f) break;   // player_can_see_napalm devuelve true si la traza choca antes: sin pantalla
+        const float d2 = (pl->r.currentOrigin[0] - z->r.currentOrigin[0]) * (pl->r.currentOrigin[0] - z->r.currentOrigin[0]) + (pl->r.currentOrigin[1] - z->r.currentOrigin[1]) *
+            (pl->r.currentOrigin[1] - z->r.currentOrigin[1]) + (pl->r.currentOrigin[2] - z->r.currentOrigin[2]) * (pl->r.currentOrigin[2] - z->r.currentOrigin[2]);
+        const float R2 = 400.0f * 400.0f;
+        if (d2 < R2) frac = std::min(1.0f, (R2 - d2) / R2 * 1.1f);
+        break;
+    }
+    const float d = std::max(-0.1f, std::min(0.1f, frac - s_flamePrev)); frac = s_flamePrev + d;
+    if (frac != s_flamePrev || frac > 0) SetDvarF("r_flameScaler", frac);
+    { static float maxF; if (frac > maxF + 0.2f) { maxF = frac; fprintf(stderr, "[H19] %s: r_flameScaler %.2f (Napalm cerca) t=%d\n", kName, frac, now); } }
+    s_flamePrev = frac;
 }
 
 // ---- eclipse / amanecer (ec / db) y time_travel
@@ -714,6 +850,7 @@ void Init(const std::vector<H19Kv> &)
         for (int k = 0; k < 3; ++k) s.dir[k] = -r[k];
         s_spears.push_back(s);
     }
+    StdInit();   // OLA E2a
     for (int j : ModelsByTn("maze_trap_wall")) { Wall w; w.j = j; float a[3]; H19_ModelGet(j, w.start, a); w.activeZ = w.start[2] - 128.0f; w.assigned = w.active = false; s_walls.push_back(w); }
     for (int l = 1; l <= 4; ++l) {   // _init_pap_spinners / init_spinner
         char tn[16]; snprintf(tn, sizeof tn, "pap_spinner%d", l);
@@ -756,6 +893,8 @@ void Notify(const std::string &ev, int now)
     }
     else if (ev == "ec") Eclipse(now);
     else if (ev == "db") Daybreak(now);
+    else StdNotify(ev, now);   // OLA E2a: SR, S1..S4, WF
+    if (ev == "ec" || ev == "db" || ev == "ge0" || ev == "ge1") QSnd(4, 0, nullptr, ev.c_str());   // OLA E2a: zombie_temple_amb.csc (hilo de sonido)
 }
 bool LevelNotify(const std::string &ev, int)
 {
@@ -788,6 +927,7 @@ void Frame(int now)
     ActorsFrame(now);
     MovesFrame(now);
     BoardsFrame(now);
+    SauceMonitor(now); TrailsFrame(now); NapalmOverlay(now);   // OLA E2a
 }
 
 // ===================================================================================================== sonido
@@ -799,8 +939,67 @@ int FakeOf(int slot, const float *org)
     auto it = s_slotFake.find(slot); if (it != s_slotFake.end()) return it->second;
     const int f = H19A_FakeAt(org); s_slotFake[slot] = f; return f;
 }
+// OLA E2a: _audio.csc audio_init (startSoundRandoms / startSoundLoops / startLineEmitters) y zombie_temple_amb.csc (sq_setup, geyser_watch).
+// Hueco COMUN: ningun mapa del harness tenia emisores de _audio.csc; aqui se hacen con los structs del propio mapa.
+struct Emit { int kind; std::string snd, notify; float a[3], b[3]; bool on; int fake; float wmin, wmax; double next; };   // kind 0 random, 1 looper, 2 linea
+std::vector<Emit> s_emit; int s_emitPlays;
+struct SqAmb { float org[3]; double next; }; std::vector<SqAmb> s_sqAmb; bool s_sqOn;
+std::vector<std::pair<double, std::string>> s_audioLater;   // level notify diferido (geyser_emitter: wait 14.5)
+float ARand(float a, float b) { return a + (b - a) * (float)rand() / (float)RAND_MAX; }
+void EmitToggle(Emit &e)
+{
+    if (e.kind == 1 || e.kind == 2) { if (e.on) H19A_StopLoop(e.fake, 0); else H19A_PlayLoop(e.fake, e.snd.c_str(), 0); }
+    e.on = !e.on;
+}
+void EmitNotify(const std::string &n) { for (Emit &e : s_emit) if (!e.notify.empty() && e.notify == n) EmitToggle(e); }
+void EmittersStart()
+{
+    std::map<std::string, const H19Kv *> byTn; for (const H19Kv &k : H19_MapEnts()) if (const char *tn = H19_Str(k, "targetname")) byTn[tn] = &k;
+    int n[3] = { 0, 0, 0 };
+    for (const H19Kv &k : H19_MapEnts()) {
+        const char *lab = H19_Str(k, "script_label"), *snd = H19_Str(k, "script_sound"); if (!lab) continue;
+        Emit e{}; e.kind = !strcmp(lab, "random") ? 0 : !strcmp(lab, "looper") ? 1 : !strcmp(lab, "line_emitter") ? 2 : -1;
+        if (e.kind < 0 || !snd || !H19_Vec(k, "origin", e.a)) continue;
+        e.snd = snd; memcpy(e.b, e.a, 12); if (const char *ss = H19_Str(k, "script_string")) e.notify = ss;
+        if (e.kind == 2) { const char *t = H19_Str(k, "target"); auto it = t ? byTn.find(t) : byTn.end(); if (it == byTn.end() || !H19_Vec(*it->second, "origin", e.b)) continue; }
+        if (e.kind == 0) { const char *a = H19_Str(k, "script_wait_min"), *b = H19_Str(k, "script_wait_max"); e.wmin = a ? (float)atof(a) : 1; e.wmax = b ? (float)atof(b) : 3;
+            e.next = H19A_NowMs() + ARand(e.wmin, e.wmax) * 1000.0; }
+        else { const char *si = H19_Str(k, "script_int"); const bool started = !si || atoi(si) != 0; e.fake = H19A_FakeAt(e.a); if (!e.fake) continue;
+            if (started) { H19A_PlayLoop(e.fake, e.snd.c_str(), 0); e.on = true; } }   // soundloopemitter / soundLineEmitter
+        ++n[e.kind]; s_emit.push_back(e);
+    }
+    for (const H19Kv &k : H19_MapEnts()) { const char *tn = H19_Str(k, "targetname"); SqAmb a{}; if (tn && !strcmp(tn, "sq_ambs") && H19_Vec(k, "origin", a.org)) s_sqAmb.push_back(a); }
+    fprintf(stderr, "[H19] %s sonido: _audio.csc: %d random, %d looper, %d line_emitter; sq_ambs %zu\n", kName, n[0], n[1], n[2], s_sqAmb.size());
+}
+void EmittersFrame()
+{
+    const double now = H19A_NowMs();
+    gentity_s *pl = H19A_PlayerEnt(); float eye[3] = { 0, 0, 0 };
+    if (pl && pl->client) { memcpy(eye, pl->client->ps.origin, 12); eye[2] += pl->client->ps.viewHeightCurrent; }
+    for (Emit &e : s_emit) {
+        if (e.kind == 0) { if (now >= e.next) { H19A_WorldSound(e.a, e.snd.c_str()); ++s_emitPlays; e.next = now + ARand(e.wmin, e.wmax) * 1000.0; } continue; }   // soundRandom_Thread
+        if (e.kind != 2 || !e.on) continue;
+        float d[3], w[3], dd = 0, t = 0; for (int k = 0; k < 3; ++k) { d[k] = e.b[k] - e.a[k]; w[k] = eye[k] - e.a[k]; dd += d[k] * d[k]; t += w[k] * d[k]; }   // linea: punto mas cercano al oyente
+        t = dd > 0 ? std::max(0.0f, std::min(1.0f, t / dd)) : 0;
+        float *o = (float *)H19A_FakeOrg(e.fake); for (int k = 0; k < 3; ++k) o[k] = e.a[k] + d[k] * t;
+    }
+    for (size_t i = 0; i < s_audioLater.size();) { if (now >= s_audioLater[i].first) { EmitNotify(s_audioLater[i].second); s_audioLater.erase(s_audioLater.begin() + i); } else ++i; }
+    if (s_sqOn) for (SqAmb &a : s_sqAmb) if (now >= a.next) {   // play_sq_ambients
+        H19A_WorldSound(a.org, (rand() % 101) <= 50 ? "evt_sq_gen_animals_clicky" : "evt_sq_gen_animals_whiny"); a.next = now + (20 + rand() % 35) * 1000.0; }
+}
+void AmbEvent(const std::string &ev)
+{
+    const double now = H19A_NowMs();
+    if (ev == "ec") { s_sqOn = true; for (SqAmb &a : s_sqAmb) a.next = now + ARand(2, 28) * 1000.0; }   // waitfor_ec: play_sq_ambients (transicion y bg: Eclipse)
+    else if (ev == "db") s_sqOn = false;   // play_sq_ambients: endon db
+    else if (ev == "ge0" || ev == "ge1") {   // geyser_emitter: alterna la linea evt_geyser_blast_N y la vuelve a alternar a los 14.5 s
+        const std::string n = "evt_geyser_blast_" + ev.substr(2); EmitNotify(n); s_audioLater.push_back({ now + 14500.0, n });
+        fprintf(stderr, "[H19] %s sonido: geiser %s (linea evt_geyser_blast)\n", kName, ev.c_str() + 2);
+    }
+}
 void AudioStart()
 {
+    EmittersStart();
     for (const CfxEnt &o : s_cfx) if (o.fxid == "fx_ztem_torch") { const int f = H19A_FakeAt(o.org); if (f) { H19A_PlayLoop(f, "amb_fire_medium", 0.5f); ++s_torches; } }   // snd_play_auto_fx
     fprintf(stderr, "[H19] %s sonido: %d antorchas con amb_fire_medium\n", kName, s_torches);
 }
@@ -812,12 +1011,14 @@ void AudioFrame(bool)
         else if (s.kind == 1) { const int f = FakeOf(s.slot, s.org); if (f) { memcpy((float *)H19A_FakeOrg(f), s.org, 12); H19A_PlayLoop(f, s.alias.c_str(), s.fade); } }
         else if (s.kind == 2) { auto it = s_slotFake.find(s.slot); if (it != s_slotFake.end() && it->second) H19A_StopLoop(it->second, s.fade); }
         else if (s.kind == 3) { auto it = s_slotFake.find(s.slot); if (it != s_slotFake.end() && it->second) memcpy((float *)H19A_FakeOrg(it->second), s.org, 12); }   // el bucle sigue al actor
+        else if (s.kind == 4) AmbEvent(s.alias);   // OLA E2a
     }
+    EmittersFrame();
 }
 void AudioStatus(std::string &out)
 {
-    char b[200]; snprintf(b, sizeof b, "; %s: antorchas %d, sonidos %d, napalm %d, shrieker %d, lanzas %d, paredes %d, exploders %d, ruletas %d",
-        kName, s_torches, s_sndPlays, s_napalmSeen, s_sonicSeen, s_spearMoves, s_wallMoves, s_expOn, s_spinState);
+    char b[300]; snprintf(b, sizeof b, "; %s: antorchas %d, sonidos %d, napalm %d, shrieker %d, lanzas %d, paredes %d, exploders %d, ruletas %d, cristal %d/%d, pinchos std %d, chorros %d, emisores %zu (%d aleatorios sonados)",
+        kName, s_torches, s_sndPlays, s_napalmSeen, s_sonicSeen, s_spearMoves, s_wallMoves, s_expOn, s_spinState, s_sauceRuns, s_waterTrails, s_stdSpikes, s_wfGush, s_emit.size(), s_emitPlays);
     out += b;
 }
 #endif

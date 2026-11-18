@@ -96,6 +96,7 @@ void __cdecl R_InitPrimaryLights(GfxLight *primaryLights);   // h5_light.cpp (r_
 static_assert(sizeof(FxEffectContainer) % 4 == 0 && 1024 * sizeof(FxEffectContainer) / 4 < 0xFFFF, "FxEffectContainer LP64");
 
 void H12_GlassGenerateVerts();   // OLA 12 (h12_barrier.cpp debil / h12_glasscl.cpp)
+void H4_GetCam(float *org, float *ang);   // OLA E2a: vista para la distancia del terremoto
 namespace {
 bool g_on, g_init, g_ready;
 GfxImage *g_floatZFar;   // floatz "lejos" para las tecnicas zfeather (ver Init)
@@ -107,11 +108,23 @@ int g_lastSvTime = -1, g_fxTime;
 const FxEffectDef *g_fxs[196];    // cgs_t::fxs (CS_EFFECT_NAMES = 2080)
 bool g_fxsTried[196];
 const FxEffectDef *g_test; int g_testNext;
+// OLA E2a: CG_StartShakeCamera / CG_UpdateCameraShake / CG_ShakeCamera (cg_camerashake.cpp) para Earthquake() del GSC
+struct Shake { float scale, length, src[3], radius, size, rumble; int time; } g_shakes[4];
+float g_shakePhase; int g_evQuake;
+bool UpdateShake(Shake &k, const float *view, int time)
+{
+    const int dt = time - k.time;
+    if (k.length <= 0 || dt < 0 || (float)dt >= k.length) return false;
+    const float d = sqrtf((k.src[0] - view[0]) * (k.src[0] - view[0]) + (k.src[1] - view[1]) * (k.src[1] - view[1]) + (k.src[2] - view[2]) * (k.src[2] - view[2]));
+    const float val = 1.0f - d / k.radius, x = (1.0f - (float)dt / k.length) * k.scale;
+    if (x <= 0) return false;
+    k.size = val < 0 ? val / x : val * x; k.rumble = x; return true;
+}
 // estado de eventos (CG_CheckPlayerstateEvents / CG_CheckEvents)
 int s_psPred = -1, s_psUnpred = -1;
 bool s_entSeen[MAX_GENTITIES_SV]; int s_entUse[MAX_GENTITIES_SV], s_entSeq[MAX_GENTITIES_SV], s_tempTime[MAX_GENTITIES_SV];
 // estadisticas
-int g_frames, g_evFlash, g_evImpact, g_evFx, g_evFxTag, g_surfs, g_maxSurfs;
+int g_frames, g_evFlash, g_evImpact, g_evFx, g_evFxTag, g_surfs, g_maxSurfs, g_distSkipped, g_projDecalSkipped;   // g_distSkipped, g_projDecalSkipped: OLA E2a
 double g_msUpd, g_msDraw, g_msMax, g_msReg;
 unsigned g_flashWeapon = ~0u; const void *g_flashMtl[32]; int g_flashMtlCount;   // ver CollectFlashMaterials
 // H5FX_SHOTS: captura PNG unos frames despues de un fogonazo / impacto / sangre (max 3 de cada) para la evidencia
@@ -220,6 +233,16 @@ void EntityEvent(int number, const gentity_s *e, int event, int eventParm, bool 
         float m[4][3];
         if (!tagName || target->s.eType == ET_PLAYER || !G_DObjGetWorldTagMatrix(target, tagName, m)) { AnglesToAxis(target->r.currentAngles, m); memcpy(m[3], target->r.currentOrigin, 12); }
         FX_PlayOrientedEffect(0, fx, g_fxTime, m[3], m); ++g_evFxTag;
+        return; }
+    case EV_EARTHQUAKE: {   // OLA E2a: CG_StartShakeCamera(scale, duracion, origen, radio); la hueco de menor tamano si las 4 estan vivas
+        Shake k{}; k.scale = e->s.lerp.u.turret.gunAngles[0]; k.length = (float)e->s.lerp.u.actor.team; k.radius = e->s.lerp.u.turret.gunAngles[1];
+        memcpy(k.src, e->r.currentOrigin, 12); k.time = level.time;
+        if (k.scale <= 0 || k.length <= 0 || k.radius <= 0) return;
+        float o[3], a[3]; H4_GetCam(o, a); UpdateShake(k, o, k.time);
+        int i = 0; for (; i < 4; ++i) if (g_shakes[i].time > level.time || (float)level.time >= g_shakes[i].time + g_shakes[i].length) break;
+        if (i == 4) { float mn = k.size; for (int j = 0; j < 4; ++j) if (mn > g_shakes[j].size) { mn = g_shakes[j].size; i = j; } }
+        if (i != 4) g_shakes[i] = k;
+        if (g_evQuake++ < 8) fprintf(stderr, "[H5FX] terremoto t=%d escala %.2f %d ms radio %.0f en (%.0f,%.0f,%.0f)\n", level.time, k.scale, (int)k.length, k.radius, k.src[0], k.src[1], k.src[2]);
         return; }
     default: return;
     }
@@ -363,6 +386,7 @@ void Init()
         fprintf(stderr, "[H5FX] precarga: %d efectos del mapa registrados en %.1f ms\n", n, NowMs() - p0);
     }
     if (const char *t = getenv("H5FX_TEST")) { g_test = FX_Register(t); fprintf(stderr, "[H5FX] prueba '%s' -> %s\n", t, g_test ? "ok" : "NO"); }
+    if (g_test && getenv("H5FX_DUMP")) DumpEffect(g_test);   // OLA E2a: elementos y materiales del efecto de prueba
     fprintf(stderr, "[H5FX] FX listos: FxSystem %zu, FxSystemBuffers %zu, FxMarksSystem %zu, FxEffect %zu, FxElem %zu; impactos %s; codemesh vb=%p\n",
         sizeof(FxSystem), sizeof(FxSystemBuffers), sizeof(FxMarksSystem), sizeof(FxEffect), sizeof(FxElem), cgMedia.fx ? cgMedia.fx->name.get() : "NO",
         (void *)g_codeMesh[0].vb.buffer);
@@ -623,6 +647,11 @@ void DrawFxModels(unsigned char techType)
         for (int k = 0; k < ns; ++k) {
             XSurface *xs = &xsurfs[k]; Material *mtl = skins ? skins[k].get() : nullptr;
             if (!mtl || !xs->vertCount) continue;
+            // OLA E2a: decals proyectados (techset mc_projected_decal*, sin tecnica lit): la malla es una caja que el original proyecta sobre
+            // la profundidad de la escena. Sin esa proyeccion se pintaba la caja oscura (crater fx_decal_zombie_crater_dirt de la aparicion
+            // del Shrieker de Shangri-La, escala 16-29). Se omiten. H7D_PROJDECAL=1 los vuelve a dibujar (diagnostico).
+            { static const bool pd = getenv("H7D_PROJDECAL") && atoi(getenv("H7D_PROJDECAL")); const MaterialTechniqueSet *ts = mtl->techniqueSet.get();
+              if (!pd && ts && strstr(ts->name.get(), "projected_decal")) { ++g_projDecalSkipped; continue; } }
             if ((int)xs->vertCount > tmpCap) { free(tmp); tmpCap = xs->vertCount + 256; void *p = nullptr; posix_memalign(&p, 16, tmpCap * sizeof(GfxPackedVertex)); tmp = (GfxPackedVertex *)p; }
             const double ts = NowMs();
             R_SkinXSurfaceSkinned(xs, skel, tmp);
@@ -724,6 +753,20 @@ void Draw(unsigned char techType)
         else g_data->drawSurfs[first + n++] = d;
     }
     g_surfs += n + g_lateCount; if ((int)(n + g_lateCount) > g_maxSurfs) g_maxSurfs = n + g_lateCount;
+    // OLA E2a: los FX con distorsion (calor, ondas: tecnica emisiva con MTL_TECHFLAG_NEEDS_RESOLVED_SCENE/POST_SUN = 2/1) muestrean la
+    // escena que R_ResolveDistortion (rb_draw3d.cpp) copia antes de R_DrawEmissive. Con el negro de FillCodeImages oscurecian lo que
+    // tapan (aparicion del Shrieker de Shangri-La, fx_ztem_sonic_zombie_spawn: la mano se veia negra) y resolver aqui la escena a
+    // RESOLVED_POST_SUN tampoco dio el color bueno, asi que se omiten: sin la ondulacion, el resto del efecto (anillos, polvo, humo)
+    // se ve igual. H5FX_DISTORT=1 los vuelve a dibujar (diagnostico).
+    static const bool distOn = getenv("H5FX_DISTORT") && atoi(getenv("H5FX_DISTORT"));
+    if (!distOn) { unsigned m = 0;
+        for (unsigned i = first; i < first + n; ++i) {
+            const GfxDrawSurf d = g_data->drawSurfs[i];
+            const MaterialTechnique *t = Material_GetTechnique(rgp.sortedMaterials[d.fields.materialSortedIndex], gfxDrawMethod.emissiveTechType);
+            if (t && (t->flags & 3)) { ++g_distSkipped; continue; }
+            g_data->drawSurfs[first + m++] = d;
+        }
+        n = m; }
     if (n) { DrawList(first, n); ShotIfDrawn(1); ShotIfDrawn(2); if (g_noLate) ShotIfDrawn(3); }
     g_data->drawSurfCount = first;
     const double dd = NowMs() - t0; g_msDraw += dd;
@@ -747,9 +790,9 @@ void Stats()
 {
     if (++g_frames % 600 || !StatsOn()) return;
     fprintf(stderr, "[H5FX] 600 frames: actualizacion %.3f ms/frame (max %.3f), dibujo %.3f ms/frame, superficies %d/frame (max %d); "
-        "eventos fogonazo %d impacto %d fx %d fx_tag %d; codemesh %u, efectos activos %d, camara %d, fogonazo tras viewmodel %u sup\n",
+        "eventos fogonazo %d impacto %d fx %d fx_tag %d; codemesh %u, efectos activos %d, camara %d, fogonazo tras viewmodel %u sup, superficies de distorsion omitidas %d, decals proyectados omitidos %d\n",
         g_msUpd / 600, g_msMax, g_msDraw / 600, g_surfs / 600, g_maxSurfs, g_evFlash, g_evImpact, g_evFx, g_evFxTag, g_data ? g_data->codeMeshCount : 0u,
-        (int)(FX_GetSystem(0)->shared.firstNewEffect - FX_GetSystem(0)->shared.firstActiveEffect), (int)FX_GetSystem(0)->system.camera.isValid, g_lateTot);
+        (int)(FX_GetSystem(0)->shared.firstNewEffect - FX_GetSystem(0)->shared.firstActiveEffect), (int)FX_GetSystem(0)->system.camera.isValid, g_lateTot, g_distSkipped, g_projDecalSkipped);
     {   // OLA 7d: marcas (FxMarksSystem: activas = las de la lista del mundo) y lista de decals/FX con luz
         FxMarksSystem *ms = FX_GetMarksSystem(0); int nm = 0;
         for (unsigned short h = ms->firstActiveWorldMarkHandle; h != 0xFFFF && nm < 100000; h = FX_MarkFromHandle(ms, h)->nextMark) ++nm;
@@ -819,4 +862,20 @@ void H5FX_InstallPre()
     g_prevLate = g_h4DrawExtra;   // ya con el viewmodel instalado: el fogonazo de vista va despues
     g_h4DrawExtra = DrawLate;
     fprintf(stderr, "[H5FX] efectos activados (EffectsCore original + codemesh emisivo)\n");
+}
+
+// OLA E2a: CG_ShakeCamera sobre los angulos de la vista (h5_play.cpp la llama antes de dibujar): la sacudida de mayor tamano manda
+bool H5FX_ShakeCamera(const float *org, float *ang, int time)
+{
+    float scale = 0, rumble = 0;
+    for (Shake &k : g_shakes) if (UpdateShake(k, org, time) && k.size > scale) { scale = k.size; rumble = k.rumble; }
+    if (scale <= 0) { g_shakePhase = crandom() * 3.1415927f; return false; }
+    if (scale > 1) scale = 1;
+    const float sx = (float)time / 600.0f;
+    ang[0] += sinf(25.132742f * sx + g_shakePhase) * rumble * 18.0f * scale;
+    ang[1] += sinf(47.12389f * sx + g_shakePhase) * rumble * 16.0f * scale;
+    ang[2] += sinf(37.699112f * sx + g_shakePhase) * rumble * 10.0f * scale;
+    static int s_logT = -100000; if (time - s_logT >= 1000) { s_logT = time;   // una linea por segundo mientras tiembla
+        fprintf(stderr, "[H5FX] sacudida t=%d tamano %.3f rumble %.3f: hasta %.2f/%.2f/%.2f grados\n", time, scale, rumble, 18.0f * rumble * scale, 16.0f * rumble * scale, 10.0f * rumble * scale); }
+    return true;
 }
