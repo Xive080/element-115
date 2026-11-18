@@ -26,6 +26,7 @@ run_texpkg() {
   TC=${TEXCACHE:-$NAT/h0/vk/tools/texcache_build/out/texcache_build}
   [ -x "$TC" ] || "$NAT/h0/vk/tools/texcache_build/build.sh" >/dev/null
   T=$(mktemp -d "${TMPDIR:-/tmp}/texrec.XXXXXX"); trap 'rm -rf "$T"' EXIT
+  mkdir -p "$T/rec"   # RecordLevel (vk_texcache_fmt.h) no crea la carpeta: sin ella no se graba nada
   echo "map_pipeline: grabando texturas de $Z (${SEG:-60} s de partida) ..."
   ( cd "$H2" && env P3_GAMEDATA="$D" H5_MAP="$Z" P3_TRACE=off V9_TEXREC="$T/rec" V9_CACHE_DIR="$T/v9cache" V9_SHADERCACHE="$T/v9.spvc" \
       V9_MAXTEX=512 V9_MAX_MB=1200 V9_RESMAX_MB=64 V9_VALIDATE=0 H5_GAME=1 H5_PLAY=1 H5_PLAY_SCRIPT=2 H5_VIEW=1 H6A_DEVICE=null \
