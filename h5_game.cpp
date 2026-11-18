@@ -244,6 +244,7 @@ void H5G_ReportBuiltins();
 extern const dvar_s *fs_debug, *fs_gameDirVar, *fs_usermapDir, *fs_ignoreLocalized, *fs_homepath, *fs_basepath;
 extern const dvar_s *enable_moving_paths, *playlist_enabled, *party_maxplayers, *playlist_entry;
 extern const dvar_s *xblive_wagermatch, *xblive_basictraining;
+const dvar_t *dynEnt_bulletForce, *dynEnt_explodeForce, *dynEnt_explodeMaxEnts;   // de DynEntity_client.cpp (ver abajo)
 static void H5G_RegisterMissingDvars()
 {
     // Live_Init (live/live_win.cpp, no compilado): SV_UploadStats (builtin uploadstats() del fin de ronda) lee xblive_wagermatch. H5d.
@@ -259,6 +260,12 @@ static void H5G_RegisterMissingDvars()
     playlist_enabled = _Dvar_RegisterBool("playlist_enabled", 0, 4u, "The server is using playlist");   // servidor sin rango
     playlist_entry = _Dvar_RegisterInt("playlist_entry", 0, 0, 0x2000, 4u, "The current server playlist entry.");
     enable_moving_paths = _Dvar_RegisterInt("enable_moving_paths", 1, 0, 1, 0, "enable moving paths");
+    // DynEntCl_RegisterDvars (DynEntity_client.cpp, no compilado): DynEntSv_RadiusDamage -> DynEntSv_GetClosestEntities lee
+    // dynEnt_explodeMaxEnts en cada explosion; sin registrar (dato a cero de genstubs) caia con SIGSEGV en cuanto una explosion
+    // tocaba un mapa con DynEnts (Call of the Dead con la M1911 mejorada, Kino con la corriente temprana). Mismos valores.
+    dynEnt_bulletForce = _Dvar_RegisterFloat("dynEnt_bulletForce", 800.0f, 0.0f, 1000000.0f, 0x1080u, "Force applied from bullet hit");
+    dynEnt_explodeForce = _Dvar_RegisterFloat("dynEnt_explodeForce", 12500.0f, 0.0f, 1000000.0f, 0x80u, "Force applied from explosion hit");
+    dynEnt_explodeMaxEnts = _Dvar_RegisterInt("dynEnt_explodeMaxEnts", 20, 0, 4096, 0x80u, "The maximum number of dynents that can be awakened by one explosion");
     // CG_RegisterDvars (cg_main_mp.cpp): _zombiemode_load.gsc hace level.clientscripts = (GetDvar("cg_usingClientScripts") != "").
     // Sin el, _createfx.gsc crea en el servidor todos los efectos createfx (175 SpawnFx en pentagon) y G_Spawn se queda sin
     // entidades; en el original el cliente local siempre lo registra a 1 y esos efectos van por clientscripts.
