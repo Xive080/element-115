@@ -16,3 +16,6 @@ when we thought it never would
 # OLA M4 (Der Riese, zombie_cod5_factory): el ff de los datos del usuario referencia el techset l_sm_b0c0_b1c1n1s1 (wc/zombie_factory_notes, glo_dec_blood_smear02_blend), que no viene; el material se sustituye en world_h4 (benigno)
 There were errors when building fast file 'zombie_codN_factory'
 Couldn't open techniqueSet 'pimp/techsets/l_sm_bNcN_bNcNnNsN.techset'
+# OLA M3 (Nacht, zombie_cod5_prototype): el ff de los datos del usuario se construyo con errores y el destructible dest_opel_blitz trae physPreset en huesos sin collmap (puertas y capo del camion); el original lo avisa igual y el camion sigue siendo destructible (benigno)
+There were errors when building fast file 'zombie_codN_prototype'
+in destructible file [dest_opel_blitz] model [dest_opel_blitz_full]

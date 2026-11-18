@@ -18,6 +18,7 @@
 #include <gfx_d3d/rb_shade.h>
 #include <gfx_d3d/r_shade.h>
 #include <gfx_d3d/r_draw_bsp.h>
+#include <gfx_d3d/r_vertexstream2.h>
 #include <gfx_d3d/r_draw_material.h>
 #include <universal/com_math.h>
 #include <universal/com_math_anglevectors.h>
@@ -223,6 +224,7 @@ static void DrawBatch(size_t b, unsigned char techType)
         R_ChangeDepthHackNearClip(ctx.source, 0);
         R_SetVertexDeclTypeWorld(ctx.state);
         R_TrackPrims(&ctx.state->prim, GFX_PRIM_STATS_WORLD);
+        if (litFamily) R_SetTerrainScorchTextures(ctx.source, m);   // OLA M3: como R_TessTrianglesList (Nacht: materiales por capas, code texture 29+)
         R_SetupPassPerObjectArgs(ctx);
         R_SetupPassPerPrimArgs(ctx);
         if (litFamily) { GfxCmdBufContext none = { 0, 0 }; R_DrawBspDrawSurfsLit(g_prim[b].data(), ctx, none); }
@@ -250,6 +252,7 @@ void H4_DrawSurfsPlaced(Material *m, const unsigned short *surfs, int n, unsigne
         R_ChangeDepthHackNearClip(ctx.source, 0);
         R_SetVertexDeclTypeWorld(ctx.state);
         R_TrackPrims(&ctx.state->prim, GFX_PRIM_STATS_BMODEL);
+        if (litFamily) R_SetTerrainScorchTextures(ctx.source, m);   // OLA M3: idem (R_TessBModel)
         R_SetupPassPerObjectArgs(ctx);
         R_SetupPassPerPrimArgs(ctx);
         if (litFamily) { GfxCmdBufContext none = { 0, 0 }; R_DrawBspDrawSurfsLit(pk.data(), ctx, none); }
@@ -422,6 +425,10 @@ static void InitInput(GfxWorld *w)
 
 static float g_fovX7d = 90.0f;
 // OLA 7d: solo el mundo (lotes del BSP, cull por frustum) con una tecnica dada, en el render target activo; para el prepase floatz
+// OLA M3: lotes cuya tecnica LIT pide la escena resuelta tras el sol (MTL_TECHFLAG_NEEDS_RESOLVED_POST_SUN = 1; agua de Nacht). El original
+// (RB_DrawScene, rb_draw3d.cpp) los deja fuera de LIT_PHASE_MAIN y del prepase de profundidad, hace R_ResolveDistortion (escena ->
+// RESOLVED_POST_SUN, compartido con RESOLVED_SCENE) y los dibuja en LIT_PHASE_POST_RESOLVE. Five y Kino no tienen ninguno.
+static bool NeedsPostSun(size_t b) { const MaterialTechnique *t = Material_GetTechnique(g_batches[b].m, 10); return t && (t->flags & 1); }
 static void DrawWorldOnly(unsigned char techType, int W, int H)
 {
     GfxSceneDef sd; memset(&sd, 0, sizeof sd);
@@ -430,7 +437,7 @@ static void DrawWorldOnly(unsigned char techType, int W, int H)
     R_SetViewportStruct(gfxCmdBufContext.source, &vpt); R_SetViewport(gfxCmdBufContext.state, &vpt);
     Frustum fr; const float tx = tanf(g_fovX7d * 0.5f * (float)M_PI / 180.0f), ty = tx * (float)H / (float)W;
     BspStatic_MakeFrustum(&fr, g_vp.origin, g_vp.axis, tx, ty); CullBatches(g_cullOn ? &fr : 0);
-    for (size_t b = 0; b < g_batches.size(); ++b) if (g_prim[b][0]) DrawBatch(b, techType);
+    for (size_t b = 0; b < g_batches.size(); ++b) if (g_prim[b][0] && !NeedsPostSun(b)) DrawBatch(b, techType);
 }
 static void RenderFrame(GfxWorld *w, const Cam &cam, int W, int H, float fovX, unsigned char techType, float fovOverrideUnused = 0)
 {
@@ -441,6 +448,15 @@ static void RenderFrame(GfxWorld *w, const Cam &cam, int W, int H, float fovX, u
     R_InitLocalCmdBufState(gfxCmdBufContext.state);
     { extern void H9_PreFrame(int, int) __attribute__((weak)); if (H9_PreFrame) { g_cw = w; H9_PreFrame(W, H); } }   // OLA 9: mapas de sombra de focos y pantallas (h9_shadow.cpp)
     { extern void H7D_FloatZPrepass(void (*)(unsigned char, int, int), int, int) __attribute__((weak)); if (H7D_FloatZPrepass) { g_cw = w; H7D_FloatZPrepass(DrawWorldOnly, W, H); } }   // OLA 7d: prepase floatz (h5_fx.cpp)
+    {   // OLA M3: floatz para los materiales del MUNDO que la leen (agua de Nacht, sw_waterflow_fresnel_w_sun): el original la deja en
+        // codeImages[FLOATZ] tras el prepase (RB_InitCodeImages / R_DepthPrepass); sin ella R_SetupPass* da Com_Error "Code texture 19".
+        // El RT del prepase (h5_fx.cpp); sin prepase (H7D_FLOATZ=0) blanco, y esos lotes se ven sin el fundido. Five y Kino no tienen materiales asi.
+        GfxCmdBufSourceState *s = gfxCmdBufContext.source;
+        if (!s->input.codeImages[TEXTURE_SRC_CODE_FLOATZ]) {
+            const GfxImage *fz = gfxRenderTargets[R_RENDERTARGET_FLOAT_Z].image ? (const GfxImage *)gfxRenderTargets[R_RENDERTARGET_FLOAT_Z].image : rgp.whiteImage;
+            if (fz) { s->input.codeImages[TEXTURE_SRC_CODE_FLOATZ] = fz; if (!s->input.codeImageSamplerStates[TEXTURE_SRC_CODE_FLOATZ]) s->input.codeImageSamplerStates[TEXTURE_SRC_CODE_FLOATZ] = 98; }
+        }
+    }
     R_SetRenderTargetSize(gfxCmdBufContext.source, R_RENDERTARGET_FRAME_BUFFER);
     R_SetRenderTarget(gfxCmdBufContext, R_RENDERTARGET_FRAME_BUFFER);
     GfxSceneDef sd; memset(&sd, 0, sizeof sd);
@@ -460,7 +476,20 @@ static void RenderFrame(GfxWorld *w, const Cam &cam, int W, int H, float fovX, u
       static const char *keep = getenv("H15_KEEP");   // ...salvo los de material con esta subcadena
       for (int b = sk0; b < sk1 && b < (int)g_batches.size(); ++b) if (!keep || !strstr(g_batches[b].m->info.name.get(), keep)) g_prim[b][0] = 0; }
     { static long mb = getenv("H4_MAXBATCH") ? atol(getenv("H4_MAXBATCH")) : 1L << 30, sb = getenv("H4_SKIPBATCH") ? atol(getenv("H4_SKIPBATCH")) : 0;   // diagnostico de memoria
-      for (size_t b = (size_t)sb; b < g_batches.size() && (long)b < sb + mb; ++b) if (g_prim[b][0]) DrawBatch(b, techType); }
+      bool post = false;
+      for (size_t b = (size_t)sb; b < g_batches.size() && (long)b < sb + mb; ++b) if (g_prim[b][0]) { if (NeedsPostSun(b)) post = true; else DrawBatch(b, techType); }
+      GfxImage *rps = gfxRenderTargets[R_RENDERTARGET_RESOLVED_POST_SUN].image;   // OLA M3: LIT_PHASE_POST_RESOLVE (lo crea h7_gfx PostFxInit)
+      if (post && rps && techType == 10) {
+          if (tess.indexCount) RB_EndTessSurface();
+          const GfxRenderTargetId keep = (GfxRenderTargetId)gfxCmdBufContext.state->renderTargetId;
+          gfxCmdBufContext.state->renderTargetId = R_RENDERTARGET_SCENE;   // como H7_PostFX: R_Resolve espera SCENE (compartido con FRAME_BUFFER)
+          R_Resolve(gfxCmdBufContext, rps);
+          gfxCmdBufContext.state->renderTargetId = keep;
+          R_SetCodeImageTexture(gfxCmdBufContext.source, TEXTURE_SRC_CODE_RESOLVED_POST_SUN, rps);
+          for (size_t b = (size_t)sb; b < g_batches.size() && (long)b < sb + mb; ++b) if (g_prim[b][0] && NeedsPostSun(b)) DrawBatch(b, techType);
+      } else if (post) { static bool said; if (!said) { said = true; std::string ms; int n = 0;
+          for (size_t b = 0; b < g_batches.size(); ++b) if (NeedsPostSun(b)) { if (++n <= 8) { ms += ' '; ms += g_batches[b].m->info.name.get(); } }
+          fprintf(stderr, "[H4] %d lotes con escena resuelta tras el sol (%s ): sin RESOLVED_POST_SUN todavia, se omiten este frame\n", n, ms.c_str()); } } }
     { extern void H7C_DrawWorldExtra(unsigned char) __attribute__((weak)); if (H7C_DrawWorldExtra) H7C_DrawWorldExtra(techType); }   // OLA 7c: brushmodels/smodels
     g_h4SkinnedDrawn = g_h4SkinnedSkipped = 0;
     static const int noExtra = getenv("H15_NOEXTRA") ? atoi(getenv("H15_NOEXTRA")) : 0;   // OLA 15B (diagnostico): 1 = sin cadena g_h4DrawExtra
@@ -600,6 +629,10 @@ bool H4_Setup(int W, int H)
     { extern void H9_Setup(GfxWorld *) __attribute__((weak)); if (H9_Setup) H9_Setup(w); }   // OLA 9 (h9_shadow.cpp)
     R_BeginFrame(); R_BeginSharedCmdList(); R_AddCmdProjectionSet2D(); R_EndFrame(); R_IssueRenderCommands(3u);   // marco vacio previo: estado inicial del backend
     rgp.world = w; g_worldDraw = &w->draw; g_worldDpvs = &w->dpvs; g_worldDpvsPlanes = &w->dpvsPlanes;
+    // OLA M3: tercer flujo de vertices del mundo (R_ReloadWorldVertexBuffers, r_bsp.cpp: R_VertexStream2_Init(vertexStream2DataSize)).
+    // Las superficies con stream2ByteOffset >= 0 (suelo y paredes por capas de Nacht) lo usan; sin el, v9 omite el draw ("stream 2 sin
+    // buffer") y no se ve el suelo. Buffer a cero = sin quemaduras de terreno. Five y Kino no tienen esas superficies.
+    if (g_worldDraw->vertexStream2DataSize) { R_VertexStream2_Init(g_worldDraw->vertexStream2DataSize); fprintf(stderr, "[H4] flujo 2 de vertices del mundo: %u bytes\n", g_worldDraw->vertexStream2DataSize); }
     for (unsigned i = 0; i < g_worldDraw->reflectionProbeCount; ++i)
         g_worldDraw->reflectionProbeTextures[i].basemap = g_worldDraw->reflectionProbes[i].reflectionImage->texture.basemap;
     if (const char *e = getenv("H15_PROBE")) for (unsigned i = 0, k = (unsigned)atoi(e); i < g_worldDraw->reflectionProbeCount && k < g_worldDraw->reflectionProbeCount; ++i)   // OLA 15B (diagnostico): todas las sondas = la k
