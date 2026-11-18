@@ -243,6 +243,7 @@ static bool PostFxInit()
 // Lo llama h7e_light.cpp al recibir el levelNotify. H7E_VISION=0 lo desactiva (se queda el vision file del mapa, como antes).
 static GfxFilm s_visFrom, s_visTo; static GfxBloom s_visFromB, s_visToB; static int s_visT0 = -1, s_visDur, s_visNow;
 void H7_VisionTime(int nowMs) { s_visNow = nowMs; }
+const char *H7_VisionNakedName() { return s_visName.c_str(); }   // OLA M1: GetVisionSetNaked del CSC (efectos del teletransporte de Kino)
 static void H7_VisionTick()
 {
     if (s_visT0 < 0 || !s_pvi) return;

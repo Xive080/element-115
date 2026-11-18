@@ -292,6 +292,8 @@ void H5L_Bind(int key) __attribute__((weak));
 int H5L_MaxKey() __attribute__((weak));
 bool H7_VisionSetNaked(const char *name, float seconds) __attribute__((weak));
 void H7_VisionTime(int nowMs) __attribute__((weak));
+const char *H7_VisionNakedName() __attribute__((weak));                      // OLA M1 (h7_gfx.cpp)
+void H7C_ClientVolFog(const float *v, int transitionMs) __attribute__((weak));   // OLA M1 (h7c_gfx.cpp): setVolFog del CSC
 void H9V_SysState(const char *sys, const char *state) __attribute__((weak));   // OLA 9 (h9_video.cpp)
 extern void (*g_h0ServerCmdHook)(const client_t *client, const char *cmd);
 
@@ -349,8 +351,12 @@ void SetModel(int mi, const char *name)
     XModel *m = DB_FindXAssetHeader(ASSET_TYPE_XMODEL, (char *)name, 1, -1).model; if (!m) return;
     s_models[mi].name = name; s_models[mi].m = m;
 }
+bool s_kino, s_packClock;   // OLA M1: zombie_theater (Kino der Toten): sistemas de su .csc (abajo, KinoInit/KinoNotify/KinoSys/KinoFrame)
+void KinoInit(const std::vector<Kv> &ents); void KinoNotify(const std::string &ev, int now); bool KinoSys(const char *sys, const std::string &st, int now);
+void KinoFrame(int now);
 void LevelNotify(const std::string &ev, int now)
 {
+    if (s_kino) { KinoNotify(ev, now); return; }
     if (ev == "ZPO") {   // pentagon_ZPO_listener + pentagon_office_light_model_swap
         s_power = true;
         for (auto &m : s_models) if (m.tn == "model_interior_office_lights") {
@@ -379,6 +385,7 @@ void ServerCmd(const client_t *client, const char *cmd)
     char ss[1024]; I_strncpyz(ss, p + 1, sizeof ss);
     std::string st = Info_ValueForKey(ss, "s");
     for (auto &c : st) if (c == '!') c = ' ';
+    if (s_kino && KinoSys(Info_ValueForKey(cs, "n"), st, level.time)) return;   // OLA M1: box_indicator de Kino (luces del tablero)
     if (H9V_SysState) H9V_SysState(Info_ValueForKey(cs, "n"), st.c_str());   // OLA 9: box_indicator (h9_video.cpp)
     if (I_stricmp(Info_ValueForKey(cs, "n"), "levelNotify")) return;
     fprintf(stderr, "[H7E] levelNotify '%s' t=%d\n", st.c_str(), level.time);
@@ -431,6 +438,7 @@ void ClientInit()
             s_lights.push_back(l);
         }
     }
+    { const char *mn = Dvar_GetString("mapname"); s_kino = mn && !strcmp(mn, "zombie_theater") && EnvOn("H19_KINO"); if (s_kino) KinoInit(ents); }
     for (auto &l : s_lights) if (!l.modelTn.empty()) for (auto &m : s_models) if (m.tn == l.modelTn) l.model = (int)(&m - &s_models[0]);
     // claves de luz de modelo: detras de las de los smodels (1024 + smodelCount + j)
     const int base = 1024 + (int)(rgp.world ? rgp.world->dpvs.smodelCount : 0), maxKey = H5L_MaxKey ? H5L_MaxKey() : 0;
@@ -556,23 +564,204 @@ void ClocksFrame()
             add = hour * 30.0f + (lm * 60 + ls) * (30.0f / 3600.0f) + el * (30.0f / 3600.0f);
         } else if (m.tn == "minute_hand") add = lm * 6.0f + ls * 0.1f + el * 0.1f;
         else if (m.tn == "second_hand") add = ls * 6.0f + el * 6.0f;
+        // zombie_theater_teleporter.csc pack_clock_init / pack_clock_run (OLA M1): reloj del Pack-a-Punch de Kino, desde "pack_clock_start",
+        // RotatePitch NEGATIVO de hand_time * rotate + first_rotate y luego rotate_bit por segundo (sin segundero: no tiene spawnflags 2)
+        else if (m.tn == "zom_clock_hour_hand" && s_packClock) add = -(h12 * 30.0f + (lm * 60 + ls) * (30.0f / 3600.0f) + el * (30.0f / 3600.0f));
+        else if (m.tn == "zom_clock_minute_hand" && s_packClock) add = -(lm * 6.0f + ls * 0.1f + el * 0.1f);
         else continue;
         if (add == m.pitchAdd) continue;
         float ang[3] = { m.ang[0] - m.pitchAdd + add, m.ang[1], m.ang[2] }; m.pitchAdd = add; SetPose((int)j, ang);
     }
 }
+
+// ---------------------------------------------------------------- OLA M1: sistemas de cliente de zombie_theater (Kino der Toten)
+// Sin VM de CSC: lo mismo que hacen sus clientscripts (rawfiles del ff, recuperados como en la ola 15F), con sus numeros:
+//  - zombie_theater.csc: theatre_ZPO_listener (level._power_on, luces del tablero de la caja, notify local "pl1"),
+//    theater_light_model_swap (model_lights_on: lights_hang_single -> lights_hang_single_on_nonflkr, zombie_zapper_cagelight ->
+//    zombie_zapper_cagelight_on), init_board_lights / theater_box_monitor (sistema "box_indicator": 9 tableros magic_box_loc_light,
+//    -1 apagadas, 99 parpadeo 0,25 s al moverse, 98 parpadeo 0,3 s en fire sale, n = verde + FX boxlight_light_ready si hay corriente).
+//  - zombie_theater_fx.csc: trap_fx_monitor (e1..e4 electricas = misc/fx_zombie_electric_trap, f1 fuego = fire_trap_med, en los
+//    script_struct sin modelo de cada trampa; "<loc>1" enciende, "<loc>0" apaga), projector_screen_fx ("sip": haz del proyector y
+//    pantalla; "ps1".."ps3" cambian la bobina), level_fog_init + dog_start_monitor / dog_stop_monitor (setVolFog, h7c_gfx.cpp).
+//  - zombie_theater_teleporter.csc: wait_for_black_box (vision "default" mientras dura), wait_for_teleport_aftereffect (uno al azar de
+//    fov / shellshock / shellshock_electric / bw / red / flashy / flare), pack_clock_init (reloj del PaP, ClocksFrame).
+// No se hace: la extracam (isExtraCam: pantalla del proyector en vivo) ni los vision sets de las salas del huevo de pascua.
+//   H19_KINO=0 lo desactiva (vuelve el comportamiento generico).
+const FxEffectDef *KFx(const char *name)
+{
+#ifdef H5FX
+    static std::map<std::string, const FxEffectDef *> c; auto it = c.find(name); if (it != c.end()) return it->second;
+    const FxEffectDef *fx = FX_Register((char *)name); c[name] = fx;
+    fprintf(stderr, "[H19] fx '%s' %s\n", name, fx ? "ok" : "NO esta");
+    return fx;
+#else
+    (void)name; return nullptr;
+#endif
+}
+// SpawnFx(clientNum, fx, origin, 0, forward, up) + triggerfx / PlayFXOnTag sobre un tag_origin con esos angulos
+unsigned KPlay(const char *name, const float *org, const float *fwd, const float *up)
+{
+#ifdef H5FX
+    const FxEffectDef *fx = KFx(name); if (!fx) return 0;
+    float ax[3][3]; memcpy(ax[0], fwd, 12); memcpy(ax[2], up, 12);
+    ax[1][0] = up[1] * fwd[2] - up[2] * fwd[1]; ax[1][1] = up[2] * fwd[0] - up[0] * fwd[2]; ax[1][2] = up[0] * fwd[1] - up[1] * fwd[0];
+    return FX_PlayOrientedEffect(0, fx, FX_GetSystem(0)->system.msecNow, org, ax);
+#else
+    (void)name; (void)org; (void)fwd; (void)up; return 0;
+#endif
+}
+unsigned KPlayAng(const char *name, const float *org, const float *ang)
+{
+    float f[3], r[3], u[3]; AngleVectors(ang, f, r, u); return KPlay(name, org, f, u);
+}
+void KKill(unsigned &h)
+{
+#ifdef H5FX
+    if (h) FX_ThroughWithEffect(0, h, false);   // Delete() del ent de FX: deja morir las particulas ya nacidas
+#endif
+    h = 0;
+}
+struct KPt { float org[3], ang[3]; unsigned h = 0; };
+struct KTrap { std::string loc, fx; std::vector<KPt> pts; };
+std::vector<KTrap> s_ktraps;
+struct KBox { int model; int loc; float org[3], ang[3]; unsigned fx = 0; };
+std::vector<KBox> s_kbox;
+const char *kBoxLocs[9] = { "start_chest_loc", "foyer_chest_loc", "crematorium_chest_loc", "alleyway_chest_loc", "control_chest_loc",
+                            "stage_chest_loc", "dressing_chest_loc", "dining_chest_loc", "theater_chest_loc" };
+int s_kboxInd = -1, s_kflashMs = 0, s_kflashNext = 0; bool s_kflashGreen;
+KPt s_kproj, s_kscreen; bool s_kprojOk, s_kscreenOk, s_kprojOn; unsigned s_kprojFx, s_kscreenFx;
+struct KStep { int at; std::string vis; float sec; float fov; };   // pasos de los efectos tras teletransporte
+std::vector<KStep> s_ksteps; std::string s_ksavedVis;
+const char *H7Naked();
+
+void KinoFog(int which, float sec)   // 0 = level_fog_init / dog_stop_monitor, 1 = dog_start_monitor
+{
+    if (!H7C_ClientVolFog) return;
+    // setVolFog(start, halfwayDist, halfwayHeight, baseHeight, r, g, b, colorScale, sunR, sunG, sunB, dirX, dirY, dirZ, startAng, endAng, time, maxOpacity)
+    static const float lv[18] = { 155.625f, 2332.79f, 677.241f, 23.2733f, 0.639216f, 0.639216f, 0.639216f, 1, 0.243137f, 0.270588f, 0.270588f, 0.291692f, -0.720765f, 0.628819f, 0, 0, 0, 1 };
+    static const float dg[18] = { 0, 302.622f, 306.395f, 344.622f, 0.458824f, 0.556863f, 0.619608f, 1, 0.243137f, 0.270588f, 0.270588f, 0.291692f, -0.720765f, 0.628819f, 0, 0, 0, 0.65f };
+    H7C_ClientVolFog(which ? dg : lv, (int)(sec * 1000.0f));
+}
+void KBoxSet(int i, int color /*0 off 1 green 2 red*/, bool fx)
+{
+    KBox &b = s_kbox[i]; KKill(b.fx);
+    SetModel(b.model, color == 1 ? "zombie_zapper_cagelight_green" : color == 2 ? "zombie_zapper_cagelight_red" : "zombie_zapper_cagelight");
+    if (fx && color) { float o[3] = { b.org[0], b.org[1], b.org[2] - 10.0f }; b.fx = KPlayAng("maps/zombie/fx_zombie_theater_lightboard_green", o, b.ang); }
+}
+void KBoxLoc(int loc, int color, bool fx) { if (loc < 0 || loc >= 9) return; for (size_t i = 0; i < s_kbox.size(); ++i) if (s_kbox[i].loc == loc) KBoxSet((int)i, color, fx); }
+void KBoxAllOff() { s_kflashMs = 0; for (size_t i = 0; i < s_kbox.size(); ++i) KBoxSet((int)i, 0, false); }
+void KBoxMonitor(int st, int now)   // theater_box_monitor
+{
+    if (st == -1) KBoxAllOff();
+    else if (st == 99 || st == 98) { s_kflashMs = st == 99 ? 250 : 300; s_kflashNext = now + s_kflashMs; s_kflashGreen = true; }   // flash_lights: wait, verdes, wait, apagadas
+    else { if (st < 0 || st > 9) return; KBoxAllOff(); s_kboxInd = st; if (s_power) KBoxLoc(st, 1, true); }
+}
+void KinoInit(const std::vector<Kv> &ents)
+{
+    std::map<std::string, std::string> trapFx = { { "dressing_room_trap", "e4" }, { "vip_room_trap", "e2" }, { "foyer_room_trap", "e1" }, { "control_room_trap", "e3" }, { "crematorium_room_trap", "f1" } };
+    for (auto &t : trapFx) { KTrap k; k.loc = t.second; k.fx = t.second[0] == 'f' ? "maps/zombie/fx_zombie_fire_trap_med" : "misc/fx_zombie_electric_trap"; s_ktraps.push_back(k); }
+    for (const Kv &k : ents) {
+        const char *cn = Str(k, "classname"), *tn = Str(k, "targetname"); if (!cn || !tn) continue;
+        if (!strcmp(cn, "script_struct")) {
+            KPt p; Vec(k, "origin", p.org); memset(p.ang, 0, 12); Vec(k, "angles", p.ang);
+            auto it = trapFx.find(tn);
+            if (it != trapFx.end() && !Str(k, "model")) for (auto &t : s_ktraps) if (t.loc == it->second) t.pts.push_back(p);
+            if (!strcmp(tn, "magic_box_loc_light") && Str(k, "script_noteworthy")) {   // init_board_lights: spawn script_model zombie_zapper_cagelight
+                int loc = -1; for (int i = 0; i < 9; ++i) if (!strcmp(kBoxLocs[i], Str(k, "script_noteworthy"))) loc = i;
+                const int m = AddModel("zombie_zapper_cagelight", p.org, p.ang, "magic_box_loc_light");
+                if (m >= 0) { KBox b; b.model = m; b.loc = loc; memcpy(b.org, p.org, 12); memcpy(b.ang, p.ang, 12); s_kbox.push_back(b); }
+            }
+            if (!strcmp(tn, "struct_theater_projector_beam")) { s_kproj = p; s_kprojOk = true; }
+            if (!strcmp(tn, "struct_theater_screen")) { s_kscreen = p; s_kscreenOk = true; }
+        }
+    }
+    size_t np = 0; for (auto &t : s_ktraps) np += t.pts.size();
+    KinoFog(0, 0.1f);   // level_fog_init
+    fprintf(stderr, "[H19] Kino: %zu trampas (%zu puntos de FX), %zu luces de tablero de la caja, proyector %s, pantalla %s, niebla de cliente %s\n",
+        s_ktraps.size(), np, s_kbox.size(), s_kprojOk ? "si" : "NO", s_kscreenOk ? "si" : "NO", H7C_ClientVolFog ? "si" : "NO");
+}
+void KinoNotify(const std::string &ev, int now)
+{
+    if (ev == "ZPO") {   // theatre_ZPO_listener + theater_light_model_swap
+        s_power = true;
+        for (auto &m : s_models) if (m.tn == "model_lights_on") {
+            if (m.name == "lights_hang_single") SetModel(&m - &s_models[0], "lights_hang_single_on_nonflkr");
+            else if (m.name == "zombie_zapper_cagelight") SetModel(&m - &s_models[0], "zombie_zapper_cagelight_on"); }
+        if (s_kboxInd != -1) KBoxMonitor(s_kboxInd, now);
+        for (auto &l : s_lights) if (l.mixer && l.mixerEvent == ev && l.mixT0 < 0 && !l.side1) l.mixT0 = now;
+        KinoNotify("pl1", now);   // level notify("pl1"): luces de corriente (mezcladores pl1)
+        return;
+    }
+    if (ev.size() == 3 && (ev[0] == 'e' || ev[0] == 'f') && isdigit((unsigned char)ev[1]) && (ev[2] == '0' || ev[2] == '1')) {   // trap_fx_monitor
+        const std::string loc = ev.substr(0, 2); const bool on = ev[2] == '1';
+        for (auto &t : s_ktraps) if (t.loc == loc) for (auto &p : t.pts) {
+            KKill(p.h);
+            if (on) { float f[3], r[3], u[3]; AngleVectors(p.ang, f, r, u); p.h = KPlay(t.fx.c_str(), p.org, f, u); }
+        }
+        fprintf(stderr, "[H19] trampa %s %s\n", loc.c_str(), on ? "encendida" : "apagada");
+        return;
+    }
+    if (ev == "sip" && !s_kprojOn) {   // projector_screen_fx
+        s_kprojOn = true;
+        if (s_kprojOk) s_kprojFx = KPlayAng("maps/zombie/fx_zombie_theater_projector_beam", s_kproj.org, s_kproj.ang);
+        if (s_kscreenOk) s_kscreenFx = KPlayAng("maps/zombie/fx_zombie_theater_screen_0", s_kscreen.org, s_kscreen.ang);
+    }
+    if ((ev == "ps1" || ev == "ps2" || ev == "ps3") && s_kprojOn && s_kscreenOk)   // projector_reel_swap: PlayFXOnTag encima del anterior
+        KPlayAng(("maps/zombie/fx_zombie_theater_screen_" + ev.substr(2)).c_str(), s_kscreen.org, s_kscreen.ang);
+    if (ev == "dog_start") KinoFog(1, 7.0f);
+    if (ev == "dog_stop") KinoFog(0, 7.0f);
+    if (ev == "pack_clock_start") s_packClock = true;
+    if (H7_VisionSetNaked && EnvOn("H7E_VISION")) {
+        if (ev == "black_box_start") { s_ksavedVis = H7Naked(); H7_VisionSetNaked("default", 0); }
+        else if (ev == "black_box_end" && !s_ksavedVis.empty()) { H7_VisionSetNaked(s_ksavedVis.c_str(), 0); s_ksavedVis.clear(); }
+        else if (ev == "teleport_ae_start") {   // wait_for_teleport_aftereffect: uno al azar (theaterAftereffectOverride = -1)
+            const std::string sv = H7Naked(); s_ksteps.clear();
+            int pick = (int)(Rand01() * 7.0f); if (pick > 6) pick = 6;
+            if (const char *e = getenv("H19_AE")) pick = atoi(e);
+            static const char *names[7] = { "fov", "shellshock", "shellshock_electric", "bw", "red", "flashy", "flare" };
+            fprintf(stderr, "[H19] efecto tras teletransporte: %s\n", names[pick]);
+            if (pick == 0) for (int i = 0; i <= 30; ++i) s_ksteps.push_back({ now + i * 17, "", 0, 30.0f + 35.0f * (i * 0.017f / 0.5f > 1 ? 1 : i * 0.017f / 0.5f) });
+            else if (pick == 3) { s_ksteps.push_back({ now, "cheat_bw_invert_contrast", 0.4f, 0 }); s_ksteps.push_back({ now + 1250, sv, 1, 0 }); }
+            else if (pick == 4) { s_ksteps.push_back({ now, "zombie_turned", 0.4f, 0 }); s_ksteps.push_back({ now + 1250, sv, 1, 0 }); }
+            else if (pick == 5) { const char *v[4] = { "cheat_bw_invert_contrast", "cheat_bw_contrast", "cheat_invert_contrast", "cheat_contrast" };
+                for (int i = 0; i < 4; ++i) s_ksteps.push_back({ now + 400 * i, v[i], 0.1f, 0 }); s_ksteps.push_back({ now + 1600, sv, 5, 0 }); }
+            else if (pick == 6) { s_ksteps.push_back({ now, "flare", 0.4f, 0 }); s_ksteps.push_back({ now + 1250, sv, 1, 0 }); }
+        }
+    }
+    for (auto &l : s_lights) if (l.mixer && l.mixerEvent == ev && l.mixT0 < 0 && !l.side1) l.mixT0 = now;   // mixer_level_activate (tl*, sip, ft1...)
+}
+bool KinoSys(const char *sys, const std::string &st, int now)
+{
+    if (I_stricmp(sys, "box_indicator")) return false;
+    KBoxMonitor(atoi(st.c_str()), now); return true;
+}
+void KinoFrame(int now)
+{
+    if (s_kflashMs && now >= s_kflashNext) {
+        for (int i = 0; i < 9; ++i) KBoxLoc(i, s_kflashGreen ? 1 : 0, false);
+        s_kflashGreen = !s_kflashGreen; s_kflashNext = now + s_kflashMs;
+    }
+    for (auto &k : s_ksteps) if (k.at >= 0 && now >= k.at) {
+        if (!k.vis.empty() && H7_VisionSetNaked) H7_VisionSetNaked(k.vis.c_str(), k.sec);
+        if (k.fov > 0) { char b[32]; snprintf(b, sizeof b, "%.2f", k.fov); Dvar_SetFromStringByName("cg_fov", b); }
+        k.at = -1;
+    }
+}
+const char *H7Naked() { const char *n = H7_VisionNakedName ? H7_VisionNakedName() : nullptr; return n && *n ? n : "zombie_theater"; }
 } // namespace
 
 void H7E_ClientFrame()
 {
     if (!s_init) ClientInit();
     if (!s_on) return;
-    if (g_h0ServerCmdHook != ServerCmd) { s_prevHook = g_h0ServerCmdHook; g_h0ServerCmdHook = ServerCmd; }
+    // una sola vez, encadenado al anterior (OLA M1: reinstalarlo cada frame hacia ciclos con h13_hud y perdia el del sonido)
+    static bool inst; if (!inst) { inst = true; s_prevHook = g_h0ServerCmdHook; g_h0ServerCmdHook = ServerCmd; }
     static int last = -1; const int now = level.time; const int dt = last < 0 ? 0 : now - last; last = now;
     if (H7_VisionTime) H7_VisionTime(now);
     float cam[3], ang[3]; H4_GetCam(cam, ang);
     LightsFrame(now, dt, cam);
     ClocksFrame();   // OLA 15F: agujas de los relojes
+    if (s_kino) KinoFrame(now);   // OLA M1
     {   // H7E_NOTIFY="ms:evento,..." (prueba): inyecta levelNotify de cliente (p.ej. "100:vis3") como si llegaran del servidor
         static std::vector<std::pair<int, std::string>> q; static bool parsed;
         if (!parsed) { parsed = true; if (const char *e = getenv("H7E_NOTIFY")) { std::string a = e; size_t p = 0;

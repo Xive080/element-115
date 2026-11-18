@@ -27,6 +27,7 @@
 static inline void *H5_AlignedAlloc(size_t a, size_t n) { void *p = nullptr; return posix_memalign(&p, a < sizeof(void *) ? sizeof(void *) : a, n ? n : a) ? nullptr : p; }
 
 #include <string>
+#include <vector>
 #include <math.h>
 #include <server/sv_world.h>
 #include <game_mp/g_combat_mp.h>
@@ -137,9 +138,57 @@ static void H5E_PlaceNearActor()
     }
 }
 
+// OLA M1: guion de prueba por tiempo de partida (diagnostico; sin la variable no hace nada), para probar en cualquier mapa lo que el
+// piloto de Five no alcanza (puertas, corriente, caja, perks, Pack-a-Punch, teletransporte): H5_TIMED="T:accion;T:accion" con T en
+// segundos de partida y accion =
+//   dvar NOMBRE VALOR        Dvar_SetFromStringByName (con H5_DEV=1 vale el devgui ORIGINAL: zombie_devgui power_on/open_sesame/money...)
+//   tp X Y Z YAW [PITCH]     TeleportPlayer (lo que hace el cheat setviewpos)
+//   use MS                   mantiene USAR (bit 3 del usercmd) MS milisegundos: la compra/accion la hace el GSC original
+//   fire MS                  mantiene DISPARO MS milisegundos
+//   shot                     captura (solo con P4_OUT)
+bool g_h5eViewResync = false;
+int g_h5eUseUntil, g_h5eFireUntil; bool g_h5eShotReq;
+namespace {
+struct TimedAct { int t; std::string a; bool done; };
+std::vector<TimedAct> s_timed; bool s_timedInit;
+void H5E_Timed()
+{
+    if (!s_timedInit) {
+        s_timedInit = true;
+        if (const char *e = getenv("H5_TIMED")) { std::string all = e; size_t p0 = 0;
+            while (p0 < all.size()) { size_t p1 = all.find(';', p0); if (p1 == std::string::npos) p1 = all.size(); std::string it = all.substr(p0, p1 - p0); p0 = p1 + 1;
+                const size_t c = it.find(':'); if (c == std::string::npos) continue; s_timed.push_back({ (int)(atof(it.substr(0, c).c_str()) * 1000.0), it.substr(c + 1), false }); } }
+    }
+    for (TimedAct &ta : s_timed)
+    {
+        if (ta.done || level.time < ta.t) continue;
+        ta.done = true;
+        char cmd[32] = ""; sscanf(ta.a.c_str(), "%31s", cmd);
+        gentity_s *pl = &g_entities[0];
+        if (!strcmp(cmd, "dvar")) { char k[96] = "", v[256] = ""; if (sscanf(ta.a.c_str(), "%*s %95s %255[^\n]", k, v) >= 1) { if (!Dvar_FindVar(k)) fprintf(stderr, "[H5E] guion: la dvar %s no existe\n", k); else Dvar_SetFromStringByName(k, v); } }
+        else if (!strcmp(cmd, "tp") && pl->r.inuse && pl->client) { float o[3], a[3] = { 0, 0, 0 }; if (sscanf(ta.a.c_str(), "%*s %f %f %f %f %f", &o[0], &o[1], &o[2], &a[1], &a[0]) >= 4) { TeleportPlayer(pl, o, a); g_h5eViewResync = true; } }
+        else if (!strcmp(cmd, "tpl") && pl->r.inuse && pl->client) {   // tpl X Y Z TX TY TZ: al suelo bajo (X,Y,Z) mirando al punto T
+            float o[3], tg[3]; if (sscanf(ta.a.c_str(), "%*s %f %f %f %f %f %f", &o[0], &o[1], &o[2], &tg[0], &tg[1], &tg[2]) == 6) {
+                const float mins[3] = { -15.0f, -15.0f, 0.0f }, maxs[3] = { 15.0f, 15.0f, 70.0f };
+                const float from[3] = { o[0], o[1], o[2] + 32.0f }, to[3] = { o[0], o[1], o[2] - 400.0f };
+                trace_t tr; col_context_t ctx; G_TraceCapsule(&tr, from, mins, maxs, to, pl->s.number, 0x2810011, &ctx);
+                if (!tr.startsolid) o[2] = from[2] + (to[2] - from[2]) * tr.fraction + 1.0f;
+                float dir[3] = { tg[0] - o[0], tg[1] - o[1], tg[2] - (o[2] + 60.0f) }, ang[3]; vectoangles(dir, ang); ang[2] = 0;
+                TeleportPlayer(pl, o, ang); g_h5eViewResync = true;
+                fprintf(stderr, "[H5E] guion: jugador en (%.0f,%.0f,%.0f)%s mirando (%.0f,%.0f,%.0f)\n", o[0], o[1], o[2], tr.startsolid ? " (SIN suelo: dentro de solido)" : "", tg[0], tg[1], tg[2]);
+            } }
+        else if (!strcmp(cmd, "use")) { int ms = 1500; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eUseUntil = level.time + ms; }
+        else if (!strcmp(cmd, "fire")) { int ms = 500; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eFireUntil = level.time + ms; }
+        else if (!strcmp(cmd, "shot")) g_h5eShotReq = true;
+        fprintf(stderr, "[H5E] t=%d guion: %s\n", level.time, ta.a.c_str());
+    }
+}
+}
+
 // Cada frame de servidor: estado del arma del jugador 0 por cambio (municion del cargador y reserva, weaponstate, arma).
 void H5E_Frame()
 {
+    H5E_Timed();
     H5E_PlaceNearActor();
     gentity_s *pl = &g_entities[0];
     if (!pl->r.inuse || !pl->client) return;

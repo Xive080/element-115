@@ -426,8 +426,10 @@ std::vector<std::string> s_musicQ;   // los comandos llegan dentro de SV_Frame; 
 struct SrvCmd { char type; std::string sys, state; };
 std::vector<SrvCmd> s_cmdQ;
 std::map<std::string, int> s_sysSeen; int s_localSnd, s_localStop, s_fades;
+void (*s_prevSrvHook)(const client_t *, const char *);
 void ServerCmdHook(const client_t *client, const char *cmd)
 {
+    if (s_prevSrvHook) s_prevSrvHook(client, cmd);   // OLA M1: encadenado (h7e_light, h13_hud) en vez de pisar el gancho
     if (!client || !cmd || !cmd[0]) return;
     if ((cmd[0] == 's' || cmd[0] == 'k' || cmd[0] == 'q') && cmd[1] == ' ') { s_cmdQ.push_back({ cmd[0], cmd + 2, "" }); return; }
     if (cmd[0] != '9' || cmd[1] != ' ') return;
@@ -809,7 +811,7 @@ bool InitSound()
     if (ded) ded->current.integer = saved;
     if (!SND_Active()) { fprintf(stderr, "[H6A] SND_Init sin dispositivo: sin sonido\n"); return false; }
     if (H10_CfgApplySound) H10_CfgApplySound();   // OLA 15C: volumenes guardados (snd_menu_*) del config.cfg de la ola 10
-    g_h0ServerCmdHook = ServerCmdHook;
+    if (g_h0ServerCmdHook != ServerCmdHook) { s_prevSrvHook = g_h0ServerCmdHook; g_h0ServerCmdHook = ServerCmdHook; }
     CG_RegisterSounds();   // OLA 14: cgMedia (golpes cuerpo a cuerpo, impactos por superficie, whizby/crack...) como CG_Init
     // OLA 15C: la tabla de impactos (CG_RegisterGraphics -> CG_RegisterImpactEffects_FastFile) es un asset del ff, no necesita
     // render: sin ella (trace, o vk sin H5FX) EV_BULLET_HIT no tenia sonido. h5_fx.cpp pone despues el mismo puntero.
@@ -1186,6 +1188,49 @@ void ClientSysStart()
     for (auto &t : tv) s_tvs.push_back(FakeAt(t.v));
     fprintf(stderr, "[H6A] sistemas de cliente: portal del pack %s, %d portales, %d pantallas de la caja\n", pack.empty() ? "NO" : "si", (int)s_tele.size(), (int)s_tvs.size());
 }
+// OLA M1: zombie_theater_amb.csc power_on_all (tras "pl1", que el cliente se notifica a si mismo al llegar "ZPO"): teleportation_audio
+// ("tpa": evt_<script_sound>_warmup en cada struct telepad y _cooldown 2 s despues), teleport_2d ("t2d"), teleport_2d_nopad ("t2dn":
+// warmup 2D y a los 1,3 s los dos 2D), teleport_beam_fx_2d ("t2bfx"), teleport_specialroom_start/go ("tss"/"tsg").
+struct KSnd { double at; float org[3]; std::string alias; };
+std::vector<KSnd> s_kSnd; bool s_kPl1;
+bool IsKino() { static int k = -1; if (k < 0) { const char *m = Dvar_GetString("mapname"); k = m && !strcmp(m, "zombie_theater") && !(getenv("H19_KINO") && !atoi(getenv("H19_KINO"))); } return k == 1; }
+void KinoAmb(const std::string &n)
+{
+    if (!IsKino()) return;
+    const float zero[3] = { 0, 0, 0 };
+    if (n == "ZPO") s_kPl1 = true;
+    if (!s_kPl1) return;
+    const double now = NowMs();
+    if (n == "tpa") {
+        const MapEnts *me = MapEntsOf(); if (!me) return;
+        const char *str = me->entityString.get(); const int len = me->numEntityChars;
+        std::map<std::string, std::string> kv; bool in = false;
+        for (int i = 0; i < len;) {   // structs telepad con script_sound
+            const char c = str[i];
+            if (c == '{') { kv.clear(); in = true; ++i; continue; }
+            if (c == '}') { ++i; if (in && kv["targetname"] == "telepad" && !kv["script_sound"].empty()) { KSnd a; sscanf(kv["origin"].c_str(), "%f %f %f", &a.org[0], &a.org[1], &a.org[2]);
+                WorldSound(a.org, ("evt_" + kv["script_sound"] + "_warmup").c_str()); a.at = now + 2000.0; a.alias = "evt_" + kv["script_sound"] + "_cooldown"; s_kSnd.push_back(a); } in = false; continue; }
+            if (c == '"' && in) { std::string k, v; ++i; while (i < len && str[i] != '"') k += str[i++]; ++i; while (i < len && str[i] != '"') ++i; if (i >= len) break; ++i; while (i < len && str[i] != '"') v += str[i++]; ++i; kv[k] = v; continue; }
+            ++i;
+        }
+    }
+    else if (n == "t2d" || n == "tsg") { WorldSound(zero, "evt_teleport_2d_fnt"); WorldSound(zero, "evt_teleport_2d_rear"); }
+    else if (n == "t2dn") { WorldSound(zero, "evt_pad_warmup_2d"); KSnd a{}; a.at = now + 1300.0; a.alias = "evt_teleport_2d_fnt|evt_teleport_2d_rear"; s_kSnd.push_back(a); }
+    else if (n == "t2bfx") WorldSound(zero, "evt_beam_fx_2d");
+    else if (n == "tss") WorldSound(zero, "evt_pad_warmup_2d");
+}
+void KinoAmbFrame()
+{
+    if (s_kSnd.empty()) return;
+    const double now = NowMs();
+    for (auto &a : s_kSnd) if (a.at > 0 && now >= a.at) {
+        size_t bar = a.alias.find('|');
+        if (bar == std::string::npos) WorldSound(a.org, a.alias.c_str());
+        else { WorldSound(a.org, a.alias.substr(0, bar).c_str()); WorldSound(a.org, a.alias.substr(bar + 1).c_str()); }
+        a.at = 0;
+    }
+    s_kSnd.erase(std::remove_if(s_kSnd.begin(), s_kSnd.end(), [](const KSnd &a) { return a.at == 0; }), s_kSnd.end());
+}
 void LevelNotify(const std::string &n)
 {
     ++s_notifySeen[n];
@@ -1202,6 +1247,7 @@ void LevelNotify(const std::string &n)
     else if (n == "minie" && s_miniOn) { WorldSound(zero, "zmb_insta_kill"); FakeStopLoop(s_mini, 0.5f); s_miniOn = false; }
     else if (n == "pack_portal_fx_off") { for (int f : s_tele) if (s_fake[f].loopSoundId == SND_FindAliasId("mus_packapunch_special")) FakeStopLoop(f, 1); }
     else if (n == "ZPO") s_powerOn = true;
+    KinoAmb(n);
 }
 // zombie_pentagon.csc pentagon_screen_switch -> play_magic_box_tv_audio (en cada pantalla)
 void BoxIndicator(const std::string &st)
@@ -1249,6 +1295,7 @@ void ClientSysFrame()
         else if (!I_stricmp(c.sys.c_str(), "lsm")) LastStand(c.state);
     }
     s_cmdQ.clear();
+    KinoAmbFrame();   // OLA M1
     // register_clientflag_callback("player", 5, teleporter_fx_init): al cambiar la bandera del jugador local (ps.eFlags2)
     if (gentity_s *pl = PlayerEnt())
     {

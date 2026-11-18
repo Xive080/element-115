@@ -329,6 +329,44 @@ void H7C_Setup(GfxWorld *w)
 // (maxDensity = 100*density, transicion terminada) y se llama al R_SetFrameFog original. H7C_FOG=0 lo apaga.
 #ifdef H5G
 #include <gfx_d3d/rb_fog.h>
+// OLA M1: setVolFog del script de CLIENTE (CScr_SetVolFog, cg_scr_sp_client.cpp): Kino no pone niebla en el CS 10 ("0"); la pone su
+// zombie_theater_fx.csc (level_fog_init, y dog_start/dog_stop en 7 s). Mismos campos que R_SetFogFromServer (density = 1/halfwayDist,
+// heightDensity = 1/halfwayHeight si >= 1) y la transicion de R_SwitchFog como interpolacion lineal de los campos en ese tiempo.
+// Solo se usa si el CS 10 no trae niebla completa (con niebla del servidor, como Five, manda el servidor).
+int __cdecl Sys_Milliseconds();
+static GfxFog s_clFogFrom, s_clFogTo; static int s_clFogT0 = -1, s_clFogDur; static bool s_clFogHave;
+static GfxFog H7C_FogFromVol(const float *v)
+{
+    GfxFog f; memset(&f, 0, sizeof f);
+    f.fogStart = v[0]; f.density = 1.0f / v[1]; f.heightDensity = v[2] >= 1.0f ? 1.0f / v[2] : 0.0f; f.baseHeight = v[3];
+    f.color[0] = v[4]; f.color[1] = v[5]; f.color[2] = v[6]; f.color[3] = v[7];
+    f.sunFogColor[0] = v[8]; f.sunFogColor[1] = v[9]; f.sunFogColor[2] = v[10]; f.sunFogDir[0] = v[11]; f.sunFogDir[1] = v[12]; f.sunFogDir[2] = v[13];
+    f.sunFogStartAng = v[14]; f.sunFogEndAng = v[15]; f.sunFogColor[3] = v[17]; f.maxDensity = 100.0f * f.density;
+    return f;
+}
+static GfxFog H7C_ClientFogNow()
+{
+    if (s_clFogT0 < 0) return s_clFogTo;
+    const float t = s_clFogDur <= 0 ? 1.0f : (float)(Sys_Milliseconds() - s_clFogT0) / (float)s_clFogDur;
+    if (t >= 1.0f) { s_clFogT0 = -1; return s_clFogTo; }
+    GfxFog r = s_clFogTo;
+    auto L = [t](float a, float b) { return a + (b - a) * t; };
+    r.fogStart = L(s_clFogFrom.fogStart, s_clFogTo.fogStart); r.density = L(s_clFogFrom.density, s_clFogTo.density);
+    r.heightDensity = L(s_clFogFrom.heightDensity, s_clFogTo.heightDensity); r.baseHeight = L(s_clFogFrom.baseHeight, s_clFogTo.baseHeight);
+    r.maxDensity = L(s_clFogFrom.maxDensity, s_clFogTo.maxDensity); r.sunFogStartAng = L(s_clFogFrom.sunFogStartAng, s_clFogTo.sunFogStartAng);
+    r.sunFogEndAng = L(s_clFogFrom.sunFogEndAng, s_clFogTo.sunFogEndAng);
+    for (int k = 0; k < 4; ++k) { r.color[k] = L(s_clFogFrom.color[k], s_clFogTo.color[k]); r.sunFogColor[k] = L(s_clFogFrom.sunFogColor[k], s_clFogTo.sunFogColor[k]); }
+    for (int k = 0; k < 3; ++k) r.sunFogDir[k] = L(s_clFogFrom.sunFogDir[k], s_clFogTo.sunFogDir[k]);
+    return r;
+}
+void H7C_ClientVolFog(const float *v, int transitionMs)
+{
+    const GfxFog to = H7C_FogFromVol(v);
+    s_clFogFrom = s_clFogHave ? H7C_ClientFogNow() : to; s_clFogTo = to; s_clFogHave = true;
+    s_clFogT0 = Sys_Milliseconds(); s_clFogDur = transitionMs;
+    fprintf(stderr, "[H7C] niebla de cliente (setVolFog): inicio %.1f mitad %.1f altura %.1f base %.1f color %.2f %.2f %.2f opacidad %.2f en %d ms\n",
+        v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[17], transitionMs);
+}
 void H7C_Fog(GfxCmdBufInput *in, const float *org)
 {
     static const bool on = !(getenv("H7C_FOG") && !atoi(getenv("H7C_FOG")));
@@ -351,8 +389,9 @@ void H7C_Fog(GfxCmdBufInput *in, const float *org)
         }
         fprintf(stderr, "[H7C] niebla CS10 (%d campos): \"%.200s\"\n", n, cs);
     }
-    if (!have) return;
-    memcpy((void *)&in->data->fogSettings, &fog, sizeof fog);   // data es const en GfxCmdBufInput; el original lo escribe el front-end
+    if (!have && !s_clFogHave) return;
+    if (have) memcpy((void *)&in->data->fogSettings, &fog, sizeof fog);
+    else { const GfxFog cf = H7C_ClientFogNow(); memcpy((void *)&in->data->fogSettings, &cf, sizeof cf); }   // data es const en GfxCmdBufInput; el original lo escribe el front-end
     static GfxViewInfo *vi = (GfxViewInfo *)calloc(1, sizeof(GfxViewInfo));
     memcpy(vi->cullViewInfo.viewParms.origin, org, 12);
     R_SetFrameFog(in, vi);

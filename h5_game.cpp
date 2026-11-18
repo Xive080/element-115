@@ -142,6 +142,8 @@ static void H5V_DrawActors(unsigned char techType)
         if (!shadow) { void H5L_Bind(int); H5L_Bind(e); }   // OLA 6b: bloque del atlas de luz y tecnica de esta entidad
         const int numModels = DObjGetNumModels(obj);
         int boneIndex = 0, drewAny = 0;
+        if (!shadow && getenv("H5_SKIN_DIAG")) { static int s_mN; static unsigned char s_last[2048]; if (e < 2048 && s_last[e] != numModels && s_mN < 80) { ++s_mN; s_last[e] = (unsigned char)numModels;
+            fprintf(stderr, "[H5V-DIAG] t=%d ent %d: %d modelos:", level.time, e, numModels); for (int m = 0; m < numModels; ++m) fprintf(stderr, " '%s'(%d huesos)", DObjGetModel(obj, m)->name.get(), XModelNumBones(DObjGetModel(obj, m))); fprintf(stderr, "\n"); } }
         for (int m = 0; m < numModels; ++m)
         {
             XModel *model = DObjGetModel(obj, m);
@@ -165,11 +167,21 @@ static void H5V_DrawActors(unsigned char techType)
                 XSurface *xs = &surfs[si];
                 Material *mtl = skins ? skins[si].get() : nullptr;
                 if (!mtl || !xs->vertCount) continue;
+                { static const char *skipMat = getenv("H5_SKIN_SKIPMAT"); if (skipMat && strstr(mtl->info.name.get(), skipMat)) continue; }   // OLA M1: diagnostico por material
                 { extern bool H7C_SurfHidden(const DObj *, const XSurface *, int) __attribute__((weak)); if (H7C_SurfHidden && H7C_SurfHidden(obj, xs, boneIndex)) continue; }   // OLA 7c: partes ocultas (R_SkinXModel)
                 if (xs->vertCount > g_h5vVertCap) { free(g_h5vVerts); g_h5vVertCap = xs->vertCount + 1024; g_h5vVerts = (GfxPackedVertex *)H5_AlignedAlloc(16, ((g_h5vVertCap * sizeof(GfxPackedVertex)) + 15) & ~15u); }
                 const double sk0 = H5V_NowMs();
                 R_SkinXSurfaceSkinned(xs, &g_h5vSkel[boneIndex], g_h5vVerts);
                 const double sk1 = H5V_NowMs(); g_h5vSkinMs += sk1 - sk0;
+                static const bool skinDiag = getenv("H5_SKIN_DIAG") && atoi(getenv("H5_SKIN_DIAG"));   // OLA M1: vertices lejos del actor (triangulos estirados)
+                if (skinDiag && !shadow)
+                {
+                    float far2 = 0; unsigned fv = 0;
+                    for (unsigned v = 0; v < xs->vertCount; ++v) { float d2 = 0; for (int j = 0; j < 3; ++j) { const float t = g_h5vVerts[v].xyz[j] - ent->r.currentOrigin[j]; d2 += t * t; } if (d2 > far2) { far2 = d2; fv = v; } }
+                    unsigned maxIdx = 0; const unsigned short *ti = xs->triIndices.get(); for (unsigned k = 0; ti && k < 3u * xs->triCount; ++k) if (ti[k] > maxIdx) maxIdx = ti[k];
+                    static int s_idxN; if (maxIdx >= xs->vertCount && s_idxN < 40) { ++s_idxN; fprintf(stderr, "[H5V-DIAG] t=%d ent %d modelo %d '%s' sup %d: indice maximo %u >= verts %u (tris %u)\n", level.time, e, m, model->name.get(), si, maxIdx, xs->vertCount, xs->triCount); }
+                    static int s_diagN; if (far2 > 150.0f * 150.0f && s_diagN < 60) { ++s_diagN; fprintf(stderr, "[H5V-DIAG] t=%d ent %d modelo %d '%s' sup %d verts %u: vertice %u a %.0f u (%.1f,%.1f,%.1f) | huesos del modelo %d desde %d, vertListCount %d, partBits %08x %08x %08x %08x\n", level.time, e, m, model->name.get(), si, xs->vertCount, fv, sqrtf(far2), g_h5vVerts[fv].xyz[0], g_h5vVerts[fv].xyz[1], g_h5vVerts[fv].xyz[2], nb, boneIndex, (int)xs->vertListCount, xs->partBits[0], xs->partBits[1], xs->partBits[2], xs->partBits[3]); }
+                }
                 if (!shadow && g_h5vLogged < 12) { ++g_h5vLogged; fprintf(stderr, "[H5V] ent %d modelo %d '%s' superficie %d verts=%u tris=%u material '%s' v0=(%.1f,%.1f,%.1f)\n", e, m, model->name.get(), si, xs->vertCount, xs->triCount, mtl->info.name.get(), g_h5vVerts[0].xyz[0], g_h5vVerts[0].xyz[1], g_h5vVerts[0].xyz[2]); }
                 H4_DrawSkinnedSurf(mtl, xs, g_h5vVerts, techType);
                 g_h5vDrawMs += H5V_NowMs() - sk1;
@@ -312,6 +324,8 @@ int H5G_Run()
     Scr_InitVariables(SCRIPTINSTANCE_SERVER);
     Scr_Init(SCRIPTINSTANCE_SERVER);
     Com_SetScriptSettings();
+    // H5_DEV=1 (OLA M1): compila los /# #/ del GSC (devgui original: zombie_devgui money/power_on/...) sin abort_on_error
+    if (getenv("H5_DEV") && atoi(getenv("H5_DEV"))) Scr_Settings(1, 1, 0, SCRIPTINSTANCE_SERVER);
     XAnimInit();
     DObjInit();
     Com_InitDObj();   // common.cpp (fin de Com_Init/Com_Restart): XAnimInit, DObjInit, Com_InitDObj
@@ -594,6 +608,23 @@ char *__cdecl PMM_ALLOC(unsigned int size, unsigned int alignment)
 }
 void __cdecl PMM_FREE(unsigned __int8 *ptr, unsigned int, unsigned int) { free(ptr); }
 void __cdecl PMM_VALIDATE(char *, unsigned int, unsigned int) {}
+
+// Con_OpenChannel (con_channels.cpp, TU de consola sin portar): solo lo llama createprintchannel() del GSC en los /# #/
+// (H5_DEV=1). Los canales de impresion no existen en el arnes: se acepta el canal para que el script siga, como si abriera.
+char __cdecl Con_OpenChannel(const char *, bool) { return 1; }
+// DevGui_IsActive (devgui.cpp, sin portar): el menu devgui en pantalla nunca esta abierto en el arnes.
+bool __cdecl DevGui_IsActive() { return false; }
+// CL_IsKeyPressed (cl_keys.cpp, cliente): ButtonPressed() del GSC de desarrollo; el jugador de prueba no tiene teclado.
+int __cdecl CL_IsKeyPressed(int, const char *) { return 0; }
+// CL_AddDebug* (cl_debugdata.cpp, dibujo de depuracion del cliente): line()/print3d()/... de los /# #/ del GSC; el arnes no los dibuja.
+void __cdecl CL_AddDebugString(const float *, const float *, float, char *, int) {}
+void __cdecl CL_AddDebugSphere(const float *, float, const float *, int, int, int) {}
+void __cdecl CL_AddDebugLine(const float *, const float *, const float *, int, int) {}
+void __cdecl CL_AddDebugAxis(const float *, const float (*)[3], float, int, int) {}
+void __cdecl CL_AddDebugStarWithText(const float *, const float *, const float *, char *, float, int) {}
+void __cdecl CL_AddDebugStar(const float *, const float *, int) {}
+void __cdecl CL_AddDebugBox(const float *, const float *, const float *, float, const float *, int, int) {}
+void __cdecl CL_AddDebugBox(const float (*)[3], const float *, const float *, const float *, const float *, int, int) {}
 
 #ifndef __ANDROID__
 #include <execinfo.h>

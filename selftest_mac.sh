@@ -10,6 +10,8 @@
 #   OSUF=i15o (binario out_vk_<OSUF>_h5/p3), BUILD=1 lo compila antes con build.sh (OPT=-O2 como el APK, JOBS=4), AUDIO=1 usa la salida de audio real
 #   (por defecto el dispositivo null: el sistema de sonido entero mezcla, pero sin sacar audio por los altavoces), TEXPKG=fichero para
 #   usar el paquete ASTC como en el Fold, y VAR=valor extra al final van al juego.
+#   MAP=zona (OLA M1) elige el mapa con H5_MAP (h18_maps.cpp: datos en <raiz>/<zona>, raiz = BO1_MAPS o ../gamedata_maps junto a P3_GAMEDATA);
+#   sin MAP no se pasa H5_MAP y el juego carga su mapa por defecto (Five), igual que antes.
 cd "$(dirname "$0")"; HERE=$PWD
 D=${1:-$HERE/selftest_out}; SEG=${2:-180}; [ $# -ge 2 ] && shift 2 || shift $#; mkdir -p "$D"; D=$(cd "$D" && pwd)
 OSUF=${OSUF:-i15o}; BIN=$HERE/out_vk_${OSUF}_h5/p3
@@ -23,7 +25,7 @@ MAXMB=${V9_MAX_MB:-640}; [ -z "$TEXPKG" ] && MAXMB=${V9_MAX_MB:-1200}
 ALARM=$((SEG * 8 + 300))   # tope de reloj: el Mac cargado puede ir lento; el juego cuenta tiempo de juego, no de reloj
 t0=$SECONDS
 env P3_TRACE=off V9_CACHE_DIR=${V9_CACHE_DIR:-$D/v9cache} V9_SHADERCACHE=${V9_SHADERCACHE:-$D/v9_shaders.spvc} V9_MAXTEX=512 V9_MAX_MB=$MAXMB V9_RESMAX_MB=64 V9_VALIDATE=0 V9_UPLOAD_MB_S=200 ${TEXPKG:+V9_TEXPKG=$TEXPKG} \
-    H5_GAME=1 H5_PLAY=1 H5_PLAY_SCRIPT=2 H5_VIEW=1 H5_SET="bo1_testclient_god 1" ${DEV:+H6A_DEVICE=$DEV} \
+    ${MAP:+H5_MAP=$MAP} H5_GAME=1 H5_PLAY=1 H5_PLAY_SCRIPT=2 H5_VIEW=1 H5_SET="bo1_testclient_god 1" ${DEV:+H6A_DEVICE=$DEV} \
     P4_OUT="$D/m.png" H5_PLAY_SHOT=$((SEG / 3)) H5_PLAY_SECONDS=$SEG H15_MEMPROFILE="$D/mem.csv" "$@" \
     perl -e "alarm $ALARM; exec @ARGV" ../vk/run_vk.sh "$BIN" > /dev/null 2> "$D/juego_completo.log"
 rc=$?; wall=$((SECONDS - t0))
@@ -41,7 +43,7 @@ pico=$(awk -F, 'NR>1 && $4>m {m=$4; f=$3} NR>1 && $5>a {a=$5; g=$3} END {printf 
 nerr=$(wc -l < "$D/errores.txt" | tr -d ' ')
 ok=1; [ $rc = 0 ] || ok=0; [ "$sig" = 0 ] || ok=0; [ "$nerr" = 0 ] || ok=0; [ $n -ge 3 ] || ok=0; [ -n "$fin" ] || ok=0
 {
-  echo "selftest_mac $(date '+%Y-%m-%d %H:%M') binario $(basename "$(dirname "$BIN")")/p3, $SEG s de juego, $wall s de reloj"
+  echo "selftest_mac $(date '+%Y-%m-%d %H:%M') binario $(basename "$(dirname "$BIN")")/p3, mapa ${MAP:-por defecto}, $SEG s de juego, $wall s de reloj"
   echo "codigo de salida $rc | SIGNAL $sig | errores nuevos $nerr | capturas $n | ronda maxima ${ronda:-?} | pico $pico"
   echo "${fin:-sin linea [H5F] FIN (no termino la partida)}"
   echo "fases de memoria (MB):"; awk -F, '$2=="FASE" || $2=="SALIDA" {printf "  %-16s t=%6.1f s  rss %5d  footprint/anon %5d  heap %5d\n", $3, $1/1000, $4/1024, $5/1024, $10/1024}' "$D/mem.csv" 2>/dev/null

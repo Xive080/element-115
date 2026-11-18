@@ -279,8 +279,34 @@ unsigned char g_h4ModelLitTech = 10;
 void (*g_h4PreFrame)();   // antes de abrir el pase del frame (subidas de texturas sin partir el render pass)
 int g_h4SkinnedDrawn, g_h4SkinnedSkipped, g_h4SkinnedTech[256];
 void (*g_h4ModelProbe)(GfxCmdBufContext, const XSurface *, const GfxPackedVertex *);   // OLA 9: sonda de reflejo del objeto (h9_reflect.cpp)
+// OLA M1: materiales de modelo que FALTAN en los datos (el DB los sustituye por el material por defecto, de techset '2d': dibujado
+// en 3D sale como triangulos grises enormes, el shader 2D toma la posicion como coordenadas de pantalla). En Kino faltan los del
+// uniforme de los zombis (mc/mtl_c_ger_honorguard_zombie_*: ninguna zona de los datos los trae, tampoco la common_zombie nueva).
+// Se usan los materiales ORIGINALES del mismo uniforme que si estan (los de los trozos de desmembramiento char_ger_honorgd_body1_g_*,
+// mismo personaje): tabla de sustitutos por nombre. Sin sustituto, la superficie no se dibuja (nunca el '2d' en 3D).
+static Material *H4_FixModelMaterial(Material *m)
+{
+    static std::map<Material *, Material *> s_fix;
+    auto it = s_fix.find(m); if (it != s_fix.end()) return it->second;
+    Material *r = m;
+    const MaterialTechniqueSet *ts = Material_GetTechniqueSet(m);
+    if (ts && ts->name.get() && !strcmp(ts->name.get(), "2d") && !Material_GetTechnique(m, 10)) {
+        static const struct { const char *from, *to; } kSubst[] = {
+            { "mc/mtl_c_ger_honorguard_zombie_body1", "mc/mtl_char_ger_honorguard_body1_1" },
+            { "mc/mtl_c_ger_honorguard_zombie_linen", "mc/mtl_char_ger_honorguard_body1_1" },
+            { "mc/mtl_c_ger_honorguard_zombie_lthr", "mc/mtl_char_ger_honorguard_lthr1_1" },
+            { "mc/mtl_c_ger_honorguard_zombie_metal", "mc/mtl_char_ger_honorguard_lthr1_1" },
+        };
+        r = nullptr; const char *to = nullptr;
+        for (const auto &e : kSubst) if (!strcmp(m->info.name.get(), e.from)) { to = e.to; break; }
+        if (to) { Material *c = DB_FindXAssetHeader(ASSET_TYPE_MATERIAL, (char *)to, 1, -1).material; const MaterialTechniqueSet *cs = c ? Material_GetTechniqueSet(c) : nullptr; if (cs && strcmp(cs->name.get(), "2d")) r = c; }
+        fprintf(stderr, "[H4] material de modelo que falta en los datos: '%s' -> %s\n", m->info.name.get(), r ? r->info.name.get() : "(no se dibuja)");
+    }
+    s_fix[m] = r; return r;
+}
 void H4_DrawSkinnedSurf(Material *m, XSurface *xsurf, GfxPackedVertex *verts, unsigned char techType)
 {
+    if (!(m = H4_FixModelMaterial(m))) return;
     GfxCmdBufContext ctx = gfxCmdBufContext;
     // La tecnica lit de los personajes muestrea TEXTURE_SRC_CODE_MODEL_LIGHTING (volumen de luz de modelo que rellena
     // r_model_lighting.cpp desde el lightgrid: sin portar). Mientras falte, se usa la primera tecnica del material que no lo
@@ -292,13 +318,18 @@ void H4_DrawSkinnedSurf(Material *m, XSurface *xsurf, GfxPackedVertex *verts, un
         bool usesModelLighting = false;
         for (unsigned p = 0; p < c->passCount && !usesModelLighting; ++p) { const MaterialPass *ps = &c->passArray[p]; int n = ps->perPrimArgCount + ps->perObjArgCount + ps->stableArgCount;
             for (int i = 0; i < n; ++i) if (ps->args[i].type == 4 && ps->args[i].u.codeSampler == 3) { usesModelLighting = true; break; } }
+        { static const char *td = getenv("H4_TECHDIAG"); static int tdn; if (td && strstr(m->info.name.get(), td) && tdn < 40) { ++tdn; fprintf(stderr, "[H4-TECH] %s pide %d cand %d '%s' passes %d modelLighting %d atlas %p\n", m->info.name.get(), (int)cand[0], (int)t, c->name.get(), (int)c->passCount, (int)usesModelLighting, (void *)g_h4ModelLight); } }   // OLA M1
         if (usesModelLighting && !g_h4ModelLight) continue;
         tech = c; techType = t; break;
     }
+    { static const char *td = getenv("H4_TECHDIAG"); static std::map<std::string, int> seenT;
+      if (td && strstr(m->info.name.get(), td) && seenT.insert({ m->info.name.get(), 1 }).second) { const MaterialTechniqueSet *ts = Material_GetTechniqueSet(m);
+        fprintf(stderr, "[H4-TECH] %s techset '%s' flags %04x:", m->info.name.get(), ts ? ts->name.get() : "-", ts ? ts->techsetFlags : 0);
+        for (int i = 0; ts && i < 130; ++i) if (ts->techniques[i].get()) fprintf(stderr, " %d", i); fprintf(stderr, "\n"); } }   // OLA M1
     if (!tech) { ++g_h4SkinnedSkipped; return; }
     ++g_h4SkinnedTech[techType];
     { static std::map<std::string, int> seenS;
-      if (getenv("H4_ARGS") && seenS.insert({ tech->name.get(), 1 }).second) {
+      if (getenv("H4_ARGS") && seenS.insert({ std::string(tech->name.get()) + "|" + m->info.name.get(), 1 }).second) {   // OLA M1: por tecnica Y material
         const MaterialPass *ps = &tech->passArray[0]; int n = ps->perPrimArgCount + ps->perObjArgCount + ps->stableArgCount;
         fprintf(stderr, "[H4args-skin] %s tech=%s(%d) prim=%d obj=%d stable=%d:", m->info.name.get(), tech->name.get(), techType, ps->perPrimArgCount, ps->perObjArgCount, ps->stableArgCount);
         for (int i = 0; i < n; ++i) { const MaterialShaderArgument *a = &ps->args[i]; fprintf(stderr, " [t%d d%d i%d]", a->type, a->dest, (a->type == 3 || a->type == 5) ? a->u.codeConst.index : (int)a->u.codeSampler); }

@@ -148,6 +148,8 @@ static void H5P_CmdButtons(client_t *bot, usercmd_s *cmd)
     const unsigned held = s_pin.buttons | s_latched;
     const unsigned list[] = { H5IN_FIRE, H5IN_ADS, H5IN_RELOAD, H5IN_MELEE, H5IN_USE, H5IN_FRAG, H5IN_SMOKE };
     for (unsigned b : list) if (held & b) cmd->button_bits.setBit((unsigned)H5P_UsercmdBit(b));
+    { extern int g_h5eUseUntil, g_h5eFireUntil; if (level.time < g_h5eUseUntil) cmd->button_bits.setBit((unsigned)H5P_UsercmdBit(H5IN_USE));   // OLA M1: H5_TIMED
+      if (level.time < g_h5eFireUntil) cmd->button_bits.setBit((unsigned)H5P_UsercmdBit(H5IN_FIRE)); }
     // arma (cgameUserCmdWeapon): un SwitchToWeapon de script llega a un cliente de prueba como peticion de bot (SV_BotSwitchWeapon ->
     // botInfos[].weapon, lo que usa Bot_UpdateWeapon); la eleccion del jugador (weapnext / peticion directa) va despues y manda.
     const int req = botInfos[pl->s.number].weapon;
@@ -229,6 +231,9 @@ static bool H5P_Sink(const H4PmCmd &c, int msec, H4PmState *out)
     memset(out, 0, sizeof *out); out->forcedStance = -1; out->viewHeight = 60.0f;
     if (!pl) { out->viewangles[0] = c.pitch; out->viewangles[1] = c.yaw; return false; }
     const playerState_s *ps = &pl->client->ps;
+    // tras un TeleportPlayer del guion H5_TIMED (tp/tpl) manda la vista del servidor, como al empezar
+    extern bool g_h5eViewResync;
+    if (g_h5eViewResync) { g_h5eViewResync = false; s_haveIn = false; }
     const bool first = !s_haveIn && s_active;
     if (s_active) { s_in = c; s_haveIn = true; }
     // posicion: interpolada entre los dos ultimos frames de servidor (fraccion = sv.timeResidual / frameMsec)
@@ -580,6 +585,7 @@ int H5P_Run(int maxFrames, bool view)
             g_h5vSkinMs = g_h5vDrawMs = 0;
             const double r0 = NowMs(); H4_Frame(); const double r1 = NowMs();
             if (g_h5vActors > 0) { skinSum += g_h5vSkinMs; drawSum += g_h5vDrawMs; frameSum += r1 - r0; svSum += s1 - s0; ++nMeasured; if (g_h5vSkinMs > skinMax) skinMax = g_h5vSkinMs; if (g_h5vActors > maxActors) maxActors = g_h5vActors; }
+            { extern bool g_h5eShotReq; if (g_h5eShotReq) { g_h5eShotReq = false; s_fShotNow = true; } }   // OLA M1: H5_TIMED shot
             if (s_active && ((shotEvery > 0 && s_scriptT >= nextShot) || (s_fShotNow && eventShots)))
             {
                 if (!s_fShotNow) { if (nextShot > 0) nextShot += shotEvery; else nextShot = s_scriptT + 0.5; }   // tras un golpe vuelve al ritmo normal
