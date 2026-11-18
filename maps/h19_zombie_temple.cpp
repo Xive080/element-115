@@ -25,10 +25,10 @@
 //  - sonido: snd_play_auto_fx(fx_ztem_torch, amb_fire_medium); "ec" evt_sq_gen_transition + bucle evt_sq_gen_bg, "db" lo quita.
 //    Salas, reverb y musica ya los lleva h5_audio_cl (ParseAmb).
 // No se hace (anotado en docs/evidencia/m7/LEEME.md): r_skyTransition/SetSunlight se ponen como dvar pero el renderizador del harness
-// no tiene cielo de transicion; vapor de napalm a la altura del agua (getwaterheight), r_flameScaler, sombreado de brillo de napalm
-// (setshaderconstant), cadenas fxanim (animacion), rastros de cristales y estela de agua del huevo (clientflags 6-9), chorros de la
-// cascada del huevo (WF), vibracion del mando en el laberinto, muneco falso del geiser (solo cooperativo) y la caja de cliente
-// (_init_magic_box esta comentada en el original).
+// no tiene cielo de transicion; r_flameScaler se escribe pero el render no lo usa, sombreado de brillo de napalm (setshaderconstant),
+// cadenas fxanim (animacion), vibracion del mando en el laberinto, muneco falso del geiser (solo cooperativo) y la caja de cliente
+// (_init_magic_box esta comentada en el original). OLA E2a anade: vapor de napalm a la altura del agua, rastros de cristales y estela
+// de agua del huevo (clientflags 6-9), chorros y pinchos de StD (WF, S1-S4), emisores de sonido de cliente y sacudidas (h5_fx).
 //   H19_TEMPLE=0 lo apaga.
 #ifdef H5G
 #include <universal/q_shared.h>
@@ -530,7 +530,7 @@ void BoardsFrame(int now)
 
 // ---- Napalm y Shrieker (clientflags de actor)
 struct JointFx { const char *tag; const char *fx; float off[3]; unsigned h; const FxEffectDef *def; };
-struct Actor { bool napalm, explode, wet, sonic; std::vector<JointFx> fx, fxEnd; int slot; int seenUse; };
+struct Actor { bool napalm, explode, wet, sonic; std::vector<JointFx> fx, fxEnd; int slot; int seenUse; unsigned steamH; const FxEffectDef *steamDef; int steamT; };
 std::map<int, Actor> s_act;
 int s_napalmSeen, s_sonicSeen;
 const char *kNapalmFx[][2] = {
@@ -538,7 +538,8 @@ const char *kNapalmFx[][2] = {
     { "napalm_distortion", "maps/zombie_temple/fx_ztem_napalm_zombie_heat" },
     { "napalm_fire_forearm_end", "maps/zombie_temple/fx_ztem_napalm_zombie_torso_end" },   // asi en el original (cruzados)
     { "napalm_fire_torso_end", "maps/zombie_temple/fx_ztem_napalm_zombie_forearm_end" },
-    { "napalm_steam", "maps/zombie_temple/fx_ztem_zombie_torso_steam_runner" } };
+    { "napalm_steam", "maps/zombie_temple/fx_ztem_zombie_torso_steam_runner" },
+    { "napalm_feet_steam", "maps/zombie_temple/fx_ztem_zombie_torso_steam_runner" } };
 bool TagMatrix(gentity_s *e, const char *tag, float m[4][3])
 {
     const unsigned t = SL_FindLowercaseString(tag, SCRIPTINSTANCE_SERVER);
@@ -586,6 +587,33 @@ const std::vector<std::pair<const char *, const char *>> kEnd = { { "j_elbow_le"
     { "j_clavicle_ri", "napalm_fire_forearm_end" }, { "j_clavicle_le", "napalm_fire_forearm_end" }, { "j_spinelower", "napalm_fire_torso_end" } };
 const std::vector<std::pair<const char *, const char *>> kWet = { { "j_spinelower", "napalm_steam" } };
 int s_nextSlot = 100;
+// OLA E2a: _napalm_zombie_RunSteamEffects cada 0.1 s: bajo el agua (getwaterheight > origen) un napalm_feet_steam a la altura del agua
+// que sigue al zombi en x/y; fuera del agua se borra. getwaterheight del cliente = CM_GetWaterHeight(pos, 200, -200) (GScr_GetWaterHeight).
+int s_steamSeen;
+void KillSteam(Actor &a) { if (a.steamH) H19_KillFx(a.steamH); a.steamH = 0; a.steamDef = nullptr; }
+void SteamFrame(gentity_s *e, Actor &a, int now)
+{
+    if (now - a.steamT < 100) return;
+    a.steamT = now;
+    const float *o = e->r.currentOrigin; const float wh = (float)CM_GetWaterHeight(o, 200.0f, -200.0f);
+    if (!(wh > o[2])) { KillSteam(a); return; }
+    const float p[3] = { o[0], o[1], wh };
+#ifdef H5FX
+    if (a.steamH && fx_systemPool) {   // self.steam_fx.origin = (x, y, waterHeight)
+        FxEffectContainer *c = UniqueHandleToEffect(&FX_GetSystem(0)->system, a.steamH);
+        if (c && c->effect.def == a.steamDef) { memcpy(c->effect.frameNow.origin, p, 12); return; }
+        a.steamH = 0;
+    }
+#endif
+    if (a.steamH) return;
+    auto it = s_effect.find("napalm_feet_steam"); if (it == s_effect.end()) return;
+    static const float fwd[3] = { 1, 0, 0 }, up[3] = { 0, 0, 1 };   // Spawn(script_model, tag_origin) sin angulos
+    a.steamH = H19_PlayFx(it->second.c_str(), p, fwd, up);
+#ifdef H5FX
+    a.steamDef = FX_Register((char *)it->second.c_str());
+#endif
+    if (s_steamSeen++ < 4) fprintf(stderr, "[H19] %s: vapor del Napalm a la altura del agua z=%.0f (pies z=%.0f) t=%d\n", kName, wh, o[2], now);
+}
 void ActorsFrame(int now)
 {
     std::map<int, bool> alive;
@@ -595,7 +623,7 @@ void ActorsFrame(int now)
         const unsigned fl = e->s.lerp.eFlags2;
         const bool napalm = fl & 1, explode = (fl >> 2) & 1, sonic = (fl >> 3) & 1, wet = (fl >> 4) & 1;
         auto it = s_act.find(n);
-        if (it != s_act.end() && it->second.seenUse != e->s.lerp.useCount) { KillJointFx(it->second.fx); KillJointFx(it->second.fxEnd); QSnd(2, it->second.slot, nullptr, nullptr); s_act.erase(it); it = s_act.end(); }
+        if (it != s_act.end() && it->second.seenUse != e->s.lerp.useCount) { KillSteam(it->second); KillJointFx(it->second.fx); KillJointFx(it->second.fxEnd); QSnd(2, it->second.slot, nullptr, nullptr); s_act.erase(it); it = s_act.end(); }
         if (it == s_act.end()) { if (!napalm && !sonic) continue; Actor a{}; a.slot = s_nextSlot++; a.seenUse = e->s.lerp.useCount; it = s_act.emplace(n, a).first; }
         Actor &a = it->second; alive[n] = true;
         if (napalm != a.napalm) {   // napalm_zombie_spawn(set): fuego en los huesos y bucle; (clear): stop_fx
@@ -603,7 +631,7 @@ void ActorsFrame(int now)
             KillJointFx(a.fx); KillJointFx(a.fxEnd);
             if (napalm) { StartJointFx(e, a.fx, a.wet ? kWet : kRun); QSnd(1, a.slot, e->r.currentOrigin, "evt_napalm_zombie_loop", 2); ++s_napalmSeen;
                 fprintf(stderr, "[H19] %s: zombi Napalm (ent %d) t=%d\n", kName, n, now); }
-            else QSnd(2, a.slot, nullptr, nullptr, 0.25f);
+            else { QSnd(2, a.slot, nullptr, nullptr, 0.25f); KillSteam(a); }
         }
         if (explode && !a.explode && a.napalm) { StartJointFx(e, a.fxEnd, kEnd); fprintf(stderr, "[H19] %s: Napalm a punto de explotar (ent %d) t=%d\n", kName, n, now); }   // napalm_zombie_explode_callback
         a.explode = explode;
@@ -617,11 +645,12 @@ void ActorsFrame(int now)
             if (sonic) { QSnd(1, a.slot, e->r.currentOrigin, "evt_sonic_ambient_loop", 1); ++s_sonicSeen; fprintf(stderr, "[H19] %s: zombi Shrieker (ent %d) t=%d\n", kName, n, now); }
         }
         FollowJointFx(e, a.fx); FollowJointFx(e, a.fxEnd);
+        if (a.napalm) SteamFrame(e, a, now);   // OLA E2a
         if (a.napalm || a.sonic) QSnd(3, a.slot, e->r.currentOrigin, nullptr);
     }
     for (auto it = s_act.begin(); it != s_act.end();) {   // el actor murio o se borro: sus efectos enlazados se van con el
         if (alive.count(it->first)) { ++it; continue; }
-        KillJointFx(it->second.fx); KillJointFx(it->second.fxEnd); QSnd(2, it->second.slot, nullptr, nullptr, 0.25f); it = s_act.erase(it);
+        KillSteam(it->second); KillJointFx(it->second.fx); KillJointFx(it->second.fxEnd); QSnd(2, it->second.slot, nullptr, nullptr, 0.25f); it = s_act.erase(it);
     }
 }
 
