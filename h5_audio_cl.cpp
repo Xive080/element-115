@@ -69,6 +69,7 @@
 #include <qcommon/cm_load_obj.h>
 #include <math.h>
 #include "world_h4.h"
+#include "h19_mapcl.h"   // OLA M2: sonido de cada mapa (maps/h19_<zona>.cpp)
 #ifdef H6SND
 #include "h6a_cgsnd.inc"   // OLA 14 (build.sh): CG_RegisterSounds/SurfaceType/ImpactType (cg_main_mp.cpp) y CG_SoundWhizby[Path] (cg_sound.cpp) tal cual
 #endif
@@ -1144,116 +1145,24 @@ void NoteHookChain()
     if (g_h12NoteHook != NoteHook) { s_prevNoteHook = g_h12NoteHook; g_h12NoteHook = NoteHook; }
 }
 
-// ---------------------------------------------------------------- OLA 14: sistemas de cliente de zombie_pentagon (sin VM de CSC)
-// Equivalentes de: _load.csc levelNotifyHandler / last_stand_monitor, zombie_pentagon_amb.csc (ascensores, minigun),
-// zombie_pentagon_teleporter.csc (portales por la clientflag 5 del jugador), zombie_pentagon.csc (pantallas de la caja, ZPO).
-struct V3 { float v[3]; };
-std::vector<V3> MapEntOrigins(const char *targetname)
-{
-    std::vector<V3> out;
-    const MapEnts *me = MapEntsOf();
-    if (!me) return out;
-    const char *str = me->entityString.get(); const int n = me->numEntityChars;
-    std::map<std::string, std::string> kv; bool in = false;
-    for (int i = 0; i < n;)
-    {
-        const char c = str[i];
-        if (c == '{') { kv.clear(); in = true; ++i; continue; }
-        if (c == '}') { ++i; if (in && kv["targetname"] == targetname) { V3 o{}; sscanf(kv["origin"].c_str(), "%f %f %f", &o.v[0], &o.v[1], &o.v[2]); out.push_back(o); } in = false; continue; }
-        if (c == '"' && in)
-        {
-            std::string k, v; ++i; while (i < n && str[i] != '"') k += str[i++]; ++i;
-            while (i < n && str[i] != '"') ++i; if (i >= n) break; ++i; while (i < n && str[i] != '"') v += str[i++]; ++i;
-            kv[k] = v; continue;
-        }
-        ++i;
-    }
-    return out;
-}
+// ---------------------------------------------------------------- OLA 14: sistemas de cliente (sin VM de CSC)
+// Generico: _load.csc levelNotifyHandler / last_stand_monitor. Lo de cada mapa (<zona>_amb.csc ascensores/portales/teletransporte,
+// pantallas de la caja...) esta desde la OLA M2 en maps/h19_<zona>.cpp (ganchos audio* de h19_mapcl.h).
 int FakeAt(const float *o) { const int f = FakeSpawn(); if (f && o) memcpy(s_fake[f].org, o, 12); return f; }
 void WorldSound(const float *o, const char *alias) { float p[3] = { o[0], o[1], o[2] }; CG_PlaySoundWithHandle(0, 1022, p, 0, 0, 1.0f, SND_FindAliasId(alias)); }   // CScr_PlaySound
 int LocalSound2D(const char *alias) { return CG_PlaySoundWithHandle(0, 1022, nullptr, 0, 0, 1.0f, SND_FindAliasId(alias)); }   // playsound(client, alias) sin posicion
-int s_ele[2], s_mini, s_lsLoop; bool s_eleOn[2], s_miniOn;
-std::vector<int> s_tele, s_tvs; int s_telePack; bool s_packtime = true, s_teleFlag, s_powerOn, s_clSysStarted;
+int s_lsLoop; bool s_clSysStarted;
 bool s_lastStand; double s_lsNextBeat, s_lsGaspAt; float s_lsPause, s_lsVol;
 std::map<std::string, int> s_notifySeen;
 void ClientSysStart()
 {
     s_clSysStarted = true;
-    const float zero[3] = { 0, 0, 0 };
-    s_ele[0] = FakeAt(zero); s_ele[1] = FakeAt(zero); s_mini = FakeAt(zero);   // spawn(0, (0,0,0), "script_origin")
-    std::vector<V3> pack = MapEntOrigins("pentagon_teleport_fx_pack"), tele = MapEntOrigins("pentagon_teleport_fx"), tv = MapEntOrigins("model_pentagon_box_screens");
-    if (!pack.empty()) { s_telePack = FakeAt(pack[0].v); FakePlayLoop(s_telePack, "evt_teleporter_loop", 1.75f); }   // teleporter_fx_setup
-    for (auto &t : tele) s_tele.push_back(FakeAt(t.v));
-    for (auto &t : tv) s_tvs.push_back(FakeAt(t.v));
-    fprintf(stderr, "[H6A] sistemas de cliente: portal del pack %s, %d portales, %d pantallas de la caja\n", pack.empty() ? "NO" : "si", (int)s_tele.size(), (int)s_tvs.size());
-}
-// OLA M1: zombie_theater_amb.csc power_on_all (tras "pl1", que el cliente se notifica a si mismo al llegar "ZPO"): teleportation_audio
-// ("tpa": evt_<script_sound>_warmup en cada struct telepad y _cooldown 2 s despues), teleport_2d ("t2d"), teleport_2d_nopad ("t2dn":
-// warmup 2D y a los 1,3 s los dos 2D), teleport_beam_fx_2d ("t2bfx"), teleport_specialroom_start/go ("tss"/"tsg").
-struct KSnd { double at; float org[3]; std::string alias; };
-std::vector<KSnd> s_kSnd; bool s_kPl1;
-bool IsKino() { static int k = -1; if (k < 0) { const char *m = Dvar_GetString("mapname"); k = m && !strcmp(m, "zombie_theater") && !(getenv("H19_KINO") && !atoi(getenv("H19_KINO"))); } return k == 1; }
-void KinoAmb(const std::string &n)
-{
-    if (!IsKino()) return;
-    const float zero[3] = { 0, 0, 0 };
-    if (n == "ZPO") s_kPl1 = true;
-    if (!s_kPl1) return;
-    const double now = NowMs();
-    if (n == "tpa") {
-        const MapEnts *me = MapEntsOf(); if (!me) return;
-        const char *str = me->entityString.get(); const int len = me->numEntityChars;
-        std::map<std::string, std::string> kv; bool in = false;
-        for (int i = 0; i < len;) {   // structs telepad con script_sound
-            const char c = str[i];
-            if (c == '{') { kv.clear(); in = true; ++i; continue; }
-            if (c == '}') { ++i; if (in && kv["targetname"] == "telepad" && !kv["script_sound"].empty()) { KSnd a; sscanf(kv["origin"].c_str(), "%f %f %f", &a.org[0], &a.org[1], &a.org[2]);
-                WorldSound(a.org, ("evt_" + kv["script_sound"] + "_warmup").c_str()); a.at = now + 2000.0; a.alias = "evt_" + kv["script_sound"] + "_cooldown"; s_kSnd.push_back(a); } in = false; continue; }
-            if (c == '"' && in) { std::string k, v; ++i; while (i < len && str[i] != '"') k += str[i++]; ++i; while (i < len && str[i] != '"') ++i; if (i >= len) break; ++i; while (i < len && str[i] != '"') v += str[i++]; ++i; kv[k] = v; continue; }
-            ++i;
-        }
-    }
-    else if (n == "t2d" || n == "tsg") { WorldSound(zero, "evt_teleport_2d_fnt"); WorldSound(zero, "evt_teleport_2d_rear"); }
-    else if (n == "t2dn") { WorldSound(zero, "evt_pad_warmup_2d"); KSnd a{}; a.at = now + 1300.0; a.alias = "evt_teleport_2d_fnt|evt_teleport_2d_rear"; s_kSnd.push_back(a); }
-    else if (n == "t2bfx") WorldSound(zero, "evt_beam_fx_2d");
-    else if (n == "tss") WorldSound(zero, "evt_pad_warmup_2d");
-}
-void KinoAmbFrame()
-{
-    if (s_kSnd.empty()) return;
-    const double now = NowMs();
-    for (auto &a : s_kSnd) if (a.at > 0 && now >= a.at) {
-        size_t bar = a.alias.find('|');
-        if (bar == std::string::npos) WorldSound(a.org, a.alias.c_str());
-        else { WorldSound(a.org, a.alias.substr(0, bar).c_str()); WorldSound(a.org, a.alias.substr(bar + 1).c_str()); }
-        a.at = 0;
-    }
-    s_kSnd.erase(std::remove_if(s_kSnd.begin(), s_kSnd.end(), [](const KSnd &a) { return a.at == 0; }), s_kSnd.end());
+    if (const H19MapCl *mc = H19_Map()) if (mc->audioStart) mc->audioStart();   // OLA M2: entidades falsas del mapa (antes las de Five aqui)
 }
 void LevelNotify(const std::string &n)
 {
     ++s_notifySeen[n];
-    const float zero[3] = { 0, 0, 0 };
-    static const char *eleA[2][3] = { { "evt_elevator_office_start", "evt_elevator_office_run", "evt_elevator_office_stop" },
-                                      { "evt_elevator_freight_start", "evt_elevator_freight_run", "evt_elevator_freight_stop" } };
-    for (int e = 0; e < 2; ++e)
-    {
-        const std::string on = e ? "ele2" : "ele1", off = on + "e";
-        if (n == on && !s_eleOn[e]) { WorldSound(zero, eleA[e][0]); FakePlayLoop(s_ele[e], eleA[e][1], 1); s_eleOn[e] = true; }
-        else if (n == off && s_eleOn[e]) { FakeStopLoop(s_ele[e], 1); WorldSound(zero, eleA[e][2]); s_eleOn[e] = false; }
-    }
-    if (n == "minis" && !s_miniOn) { FakePlayLoop(s_mini, "zmb_insta_kill_loop", 0); s_miniOn = true; }
-    else if (n == "minie" && s_miniOn) { WorldSound(zero, "zmb_insta_kill"); FakeStopLoop(s_mini, 0.5f); s_miniOn = false; }
-    else if (n == "pack_portal_fx_off") { for (int f : s_tele) if (s_fake[f].loopSoundId == SND_FindAliasId("mus_packapunch_special")) FakeStopLoop(f, 1); }
-    else if (n == "ZPO") s_powerOn = true;
-    KinoAmb(n);
-}
-// zombie_pentagon.csc pentagon_screen_switch -> play_magic_box_tv_audio (en cada pantalla)
-void BoxIndicator(const std::string &st)
-{
-    const char *alias = st == "n" ? (s_powerOn ? "amb_tv_static" : nullptr) : st == "f" ? "mus_fire_sale" : "amb_tv_static";
-    for (int f : s_tvs) { if (alias) FakePlayLoop(f, alias, 0.5f); else FakeStopLoop(f, 0.5f); }
+    if (const H19MapCl *mc = H19_Map()) if (mc->audioNotify) mc->audioNotify(n);   // OLA M2 (Five: ascensores/minigun/portal; Kino: teletransporte)
 }
 // _load.csc last_stand_monitor / last_stand_thread / end_last_stand (los cambios de bus de _busing.csc no se emulan)
 void LastStand(const std::string &st)
@@ -1291,22 +1200,11 @@ void ClientSysFrame()
         else if (c.type == 'k') { CG_StopSoundAlias(0, PlayerEnt() ? PlayerEnt()->s.number : 0, (unsigned)strtoll(c.sys.c_str(), nullptr, 10)); ++s_localStop; }
         else if (c.type == 'q') { if (1.5287900e-05 > atof(c.sys.c_str())) SND_FadeOut(); else SND_FadeIn(); ++s_fades; }
         else if (!I_stricmp(c.sys.c_str(), "levelNotify")) { if (!c.state.empty()) LevelNotify(c.state); }
-        else if (!I_stricmp(c.sys.c_str(), "box_indicator")) BoxIndicator(c.state);
         else if (!I_stricmp(c.sys.c_str(), "lsm")) LastStand(c.state);
+        else if (const H19MapCl *mc = H19_Map()) { if (mc->audioSys) mc->audioSys(c.sys, c.state); }   // OLA M2 (Five: box_indicator de las pantallas)
     }
     s_cmdQ.clear();
-    KinoAmbFrame();   // OLA M1
-    // register_clientflag_callback("player", 5, teleporter_fx_init): al cambiar la bandera del jugador local (ps.eFlags2)
-    if (gentity_s *pl = PlayerEnt())
-    {
-        const bool f = testFlag || (pl->client && ((pl->client->ps.eFlags2 >> 5) & 1));
-        if (f != s_teleFlag)
-        {
-            s_teleFlag = f;
-            if (f && s_packtime) { s_packtime = false; for (int t : s_tele) { WorldSound(s_fake[t].org, "evt_teleporter_start"); FakePlayLoop(t, "evt_teleporter_loop", 1.75f); } }
-            else if (!f && !s_packtime) { s_packtime = true; for (int t : s_tele) FakePlayLoop(t, "mus_packapunch_special", 1); }
-        }
-    }
+    if (const H19MapCl *mc = H19_Map()) if (mc->audioFrame) mc->audioFrame(testFlag);   // OLA M2 (Kino: sonidos diferidos; Five: portales por la clientflag 5)
     const double now = NowMs();
     if (s_lastStand && now >= s_lsNextBeat)
     {
@@ -1317,6 +1215,16 @@ void ClientSysFrame()
     if (s_lsGaspAt > 0 && now >= s_lsGaspAt) { LocalSound2D("revive_gasp"); s_lsGaspAt = 0; }
 }
 } // namespace
+
+// ---------------------------------------------------------------- OLA M2: ayudantes de h19_mapcl.h para los clientes de mapa
+double H19A_NowMs() { return NowMs(); }
+int H19A_FakeAt(const float *org) { return FakeAt(org); }
+const float *H19A_FakeOrg(int f) { return s_fake[f].org; }
+bool H19A_FakeLoopIs(int f, const char *alias) { return s_fake[f].loopSoundId == SND_FindAliasId(alias); }
+void H19A_PlayLoop(int f, const char *alias, float fadeSec) { FakePlayLoop(f, alias, fadeSec); }
+void H19A_StopLoop(int f, float fadeSec) { FakeStopLoop(f, fadeSec); }
+void H19A_WorldSound(const float *org, const char *alias) { WorldSound(org, alias); }
+gentity_s *H19A_PlayerEnt() { return PlayerEnt(); }
 
 // ---------------------------------------------------------------- frame de audio (h5_play.cpp, una vez por frame de render)
 static void H6A_Frame(bool serverFrame, const float *camOrg, const float *camAng)
@@ -1400,8 +1308,9 @@ static void H6A_Frame(bool serverFrame, const float *camOrg, const float *camAng
         std::string sy, no;
         for (auto &p : s_sysSeen) sy += " " + p.first + "x" + std::to_string(p.second);
         for (auto &p : s_notifySeen) no += " " + p.first + "x" + std::to_string(p.second);
-        fprintf(stderr, "[H6A] cliente t=%d: playlocalsound %d, stoplocalsound %d, fundidos %d, sistemas:%s; levelNotify:%s; portal %s, energia %s\n",
-            level.time, s_localSnd, s_localStop, s_fades, sy.c_str(), no.c_str(), s_packtime ? "pack" : "normal", s_powerOn ? "si" : "no");
+        std::string ex; if (const H19MapCl *mc = H19_Map()) if (mc->audioStatus) mc->audioStatus(ex);   // OLA M2 (Five: "; portal pack, energia no")
+        fprintf(stderr, "[H6A] cliente t=%d: playlocalsound %d, stoplocalsound %d, fundidos %d, sistemas:%s; levelNotify:%s%s\n",
+            level.time, s_localSnd, s_localStop, s_fades, sy.c_str(), no.c_str(), ex.c_str());
     }
 }
 

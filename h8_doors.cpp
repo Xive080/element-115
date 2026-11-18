@@ -31,6 +31,7 @@
 extern GfxWorld *g_h8World;   // world_h4.cpp (puede ser nulo sin vista)
 GfxWorld *g_h8World;
 
+#include "h19_mapcl.h"   // OLA M2: gancho doorEnt del mapa
 static const char *H8_Str(unsigned short s) { return s ? SL_ConvertToString(s, SCRIPTINSTANCE_SERVER) : ""; }
 
 static std::set<std::string> g_h8Targets;   // destinos de los triggers zombie_door / zombie_debris
@@ -38,8 +39,9 @@ static bool H8_Interesting(const gentity_s *e)
 {
     if (e->targetname && g_h8Targets.count(H8_Str(e->targetname))) return true;
     const char *cn = H8_Str(e->classname), *tn = H8_Str(e->targetname), *sn = H8_Str(e->script_noteworthy);
-    return strstr(tn, "door") || strstr(tn, "debris") || strstr(tn, "glass") || strstr(sn, "door") || strstr(sn, "debris")
-        || strstr(cn, "glass") || strstr(tn, "zone") || strstr(tn, "blocker") || strstr(tn, "elevator");
+    if (strstr(tn, "door") || strstr(tn, "debris") || strstr(tn, "glass") || strstr(sn, "door") || strstr(sn, "debris")
+        || strstr(cn, "glass") || strstr(tn, "zone") || strstr(tn, "blocker") || strstr(tn, "elevator")) return true;
+    const H19MapCl *mc = H19_Map(); return mc && mc->doorEnt && mc->doorEnt(tn, sn, cn);   // OLA M2: puertas con nombre propio del mapa
 }
 
 void H8_Dump(const char *tag)
