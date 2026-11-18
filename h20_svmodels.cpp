@@ -285,7 +285,7 @@ void Tour()
         const float got = tr.fraction * want - 20.0f; if (got > best) { best = got; for (int j = 0; j < 3; ++j) bo[j] = c[j] + d[j] * (got > 0 ? got : 0); } }
     { const float hm[3] = { -15, -15, 0 }, hx[3] = { 15, 15, 70 }, from[3] = { bo[0], bo[1], bo[2] }, to[3] = { bo[0], bo[1], bo[2] - 300.0f };
       trace_t tr; memset(&tr, 0, sizeof tr); col_context_t ctx; G_TraceCapsule(&tr, from, hm, hx, to, 0, 0x2810011, &ctx); if (!tr.startsolid) bo[2] = from[2] + (to[2] - from[2]) * tr.fraction + 1.0f; }
-    float dir[3] = { c[0] - bo[0], c[1] - bo[1], c[2] - (bo[2] + 60.0f) }, ang[3]; vectoangles(dir, ang); ang[2] = 0;
+    float dir[3] = { c[0] - bo[0], c[1] - bo[1], c[2] - (bo[2] + 60.0f) }, ang[3]; vectoangles(dir, ang); ang[2] = 0; if (ang[0] > 180.0f) ang[0] -= 360.0f;   // E1a: la camara recorta 0..360 a 89
     TeleportPlayer(pl, bo, ang); g_h5eViewResync = true;
     fprintf(stderr, "[H20] gira %d t=%d: ent %d %s (tn=%s) en (%.0f %.0f %.0f), jugador en (%.0f %.0f %.0f) a %.0f u\n", idx, level.time, n, DObjGetModel(Com_GetServerDObj(n), 0)->name.get(), Sl(e->targetname),
         c[0], c[1], c[2], bo[0], bo[1], bo[2], best);

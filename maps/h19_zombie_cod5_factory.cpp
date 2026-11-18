@@ -20,8 +20,9 @@
 //    fin de viaje, trampas "warehouse"/"wuen"/"bridge" con 48,5 s; pa_play_dialog no pisa una frase que aun suena), pole_fx_audio
 //    (tras "scd<N>": FX zombie_elec_pole_terminal + pole_spark cada 2..6 s en pole_fx_N), homepad_loop y linkall_2d ("pap1"),
 //    y el sonido de la chispa del cable (tele_spark_hit + bucle tele_spark_loop que sigue a la chispa).
-// No se hace: flytrap_lev_objects ("ag1", objetos del huevo de pascua que flotan: el port no mueve script_model de cliente), zombify
-// (zombie_grain; el GSC de este mapa no lo usa) ni la radio/fonografo de _waw_zombiemode_radio.
+// OLA E1a: flytrap_lev_objects ("ag1": los 8 ee_floaty_stuff suben, giran y salen volando, con FX y sonido; ver FlytrapStart).
+// No se hace: zombify (zombie_grain; el GSC de este mapa no lo usa). La radio KZMB de _waw_zombiemode_radio no existe en este mapa
+// (no hay entidades kzmb); radios, fonografos, meteoritos y escondite son GSC puro (servidor) y no necesitan cliente.
 //   H19_FACTORY=0 lo apaga. H19_AE=n fija el efecto tras teletransporte (prueba).
 #ifdef H5G
 #include <universal/q_shared.h>
@@ -41,6 +42,17 @@
 #include <string>
 #include <vector>
 #include "h19_mapcl.h"
+#ifdef H5FX
+#include <EffectsCore/fx_system.h>
+#include <EffectsCore/fx_unique_handle.h>
+const FxEffectDef *__cdecl FX_Register(char *name);   // h5_fx.cpp
+extern FxSystemContainer *fx_systemPool;              // fx_system.cpp (lo reserva h5_fx)
+#endif
+// OLA M7: pose de los script_model de cliente (h7e_light.cpp; declarados aqui y no en h19_mapcl.h, que recompila todo)
+int H19_ModelCount();
+const char *H19_ModelTn(int j);
+bool H19_ModelGet(int j, float *org, float *ang);
+void H19_ModelPose(int j, const float *org, const float *ang);
 #ifdef H6SND
 #include <sound/snd_bank.h>
 #include <sound/snd_public_async.h>
@@ -137,6 +149,96 @@ struct Step { int at; std::string vis; float sec; float fov; };
 std::vector<Step> s_steps; std::string s_savedVis;
 const char *Naked() { const char *n = H7_VisionNakedName ? H7_VisionNakedName() : nullptr; return n && *n ? n : "zombie_factory"; }
 
+// OLA E1a: huevo del flytrap en el cliente (zombie_cod5_factory_fx.csc flytrap_lev_objects / anti_grav_move / flytrap_audio_mover).
+// El GSC original (flytrap(): disparo de arma mejorada a trig_ee_flytrap) manda "ag1". Los 8 script_model de cliente ee_floaty_stuff
+// suben 4 s a su trap_ag_spot (cadena trap_ag_spot0 -> target...), giran por la cadena con intervalo 0,4 s que baja 0,1 por vuelta
+// (y +15 de altura por vuelta desde la primera) hasta interval <= 0,1 al pasar por el punto 0, y salen 5 s hacia trap_flyaway_spot
+// (+-100 en X); a los 4,7 s se borran. Cada uno lleva el FX powerup_on en tag_origin y un bucle flytrap_loop en una entidad falsa
+// que le sigue cada 0,05 s; flytrap_spin al subir y shoot_off al salir. MoveTo sin aceleracion = lineal.
+struct FtSnd { int kind; int slot; float org[3]; std::string alias; };   // 0 playsound en org, 1 bucle en slot, 2 mover slot, 3 parar slot
+std::vector<FtSnd> s_ftQ;                                                 // protegido por s_sndMu (lo vacia AudioFrame)
+void FtQ(int kind, int slot, const float *org, const char *alias)
+{
+#ifdef H6SND
+    FtSnd s; s.kind = kind; s.slot = slot; memcpy(s.org, org, 12); s.alias = alias ? alias : "";
+    std::lock_guard<std::mutex> g(s_sndMu); s_ftQ.push_back(s);
+#else
+    (void)kind; (void)slot; (void)org; (void)alias;
+#endif
+}
+struct Floater { int j, k, phase, t0, dur, index, del, nextSnd; float from[3], to[3], interval, zinc, offset; unsigned fx; };
+std::vector<Floater> s_fl; std::vector<Pt> s_hover; Pt s_flyaway; bool s_ag, s_ftFollow = true; int s_ftLeft;
+const float kOne = 1.0f;
+void FtMove(Floater &f, const float *dst, float sec, int now)
+{
+    float a[3]; H19_ModelGet(f.j, f.from, a); memcpy(f.to, dst, 12); f.t0 = now; f.dur = (int)(sec * 1000.0f + 0.5f);
+}
+void FtSpinStep(Floater &f, int now)   // una vuelta del while( !stop_spinning ) de anti_grav_move
+{
+    bool stop = false;
+    if (++f.index >= (int)s_hover.size()) f.index = 0;
+    if (f.index == f.k) { f.interval = f.interval - 0.1f; f.zinc = 15.0f; }
+    if (f.interval <= 0.1f && f.index == 0) stop = true;
+    f.offset = f.offset + f.zinc;
+    const float d[3] = { s_hover[f.index].org[0], s_hover[f.index].org[1], s_hover[f.index].org[2] + f.offset };
+    FtMove(f, d, f.interval, now);
+    f.phase = stop ? 3 : 2;   // 3: ultima vuelta, al acabar sale volando
+}
+void FlytrapStart(int now)   // level waittill("ag1")
+{
+    if (s_ag) return; s_ag = true;
+    s_hover = Chain("trap_ag_spot0");
+    if (s_structs.count("trap_flyaway_spot")) s_flyaway = s_structs["trap_flyaway_spot"][0]; else memset(&s_flyaway, 0, sizeof s_flyaway);
+    int k = 0;
+    for (int j = 0; j < H19_ModelCount(); ++j) {
+        if (strcmp(H19_ModelTn(j), "ee_floaty_stuff")) continue;
+        Floater f; memset(&f, 0, sizeof f); f.j = j; f.k = k++; f.index = f.k; f.interval = 0.4f; f.del = -1;
+        if (f.k >= (int)s_hover.size()) { fprintf(stderr, "[H19] flytrap: objeto %d sin trap_ag_spot (hay %zu)\n", f.k, s_hover.size()); continue; }
+        float o[3], a[3]; H19_ModelGet(j, o, a);
+        FtQ(1, f.k, o, "flytrap_loop");   // spawnfakeent + playloopsound(flytrap_loop)
+        float fw[3], rt[3], up[3]; AngleVectors(a, fw, rt, up);
+        f.fx = H19_PlayFx("misc/fx_zombie_powerup_on", o, fw, up);   // playfxontag(powerup_on, self, "tag_origin")
+        FtQ(0, -1, o, "flytrap_spin");
+        FtMove(f, s_hover[f.k].org, 4.0f, now); f.phase = 1; f.nextSnd = now + 50;
+        s_fl.push_back(f);
+    }
+    s_ftLeft = (int)s_fl.size();
+    fprintf(stderr, "[H19] flytrap (ag1): %zu objetos ee_floaty_stuff flotan, %zu puntos trap_ag_spot, salida (%.0f,%.0f,%.0f) t=%d\n",
+        s_fl.size(), s_hover.size(), s_flyaway.org[0], s_flyaway.org[1], s_flyaway.org[2], now);
+}
+void FlytrapFrame(int now)
+{
+    for (Floater &f : s_fl) {
+        if (f.phase == 0) continue;
+        float o[3], a[3]; H19_ModelGet(f.j, o, a);
+        const float t = f.dur > 0 ? (float)(now - f.t0) / (float)f.dur : kOne, u = t > 1.0f ? 1.0f : t < 0 ? 0 : t;
+        for (int c = 0; c < 3; ++c) o[c] = f.from[c] + (f.to[c] - f.from[c]) * u;
+        H19_ModelPose(f.j, o, a);
+#ifdef H5FX
+        if (f.fx && fx_systemPool) {   // el FX va en tag_origin del objeto: se escribe frameNow como FX_UpdateEffectBolt
+            FxEffectContainer *c = UniqueHandleToEffect(&FX_GetSystem(0)->system, f.fx);
+            if (c && c->effect.def == FX_Register((char *)"misc/fx_zombie_powerup_on")) memcpy(c->effect.frameNow.origin, o, 12);
+        }
+#endif
+        if (s_ftFollow && now >= f.nextSnd) { FtQ(2, f.k, o, nullptr); f.nextSnd = now + 50; }   // flytrap_audio_mover: realwait(0.05)
+        if (f.phase == 4) {   // saliendo: a los 4,7 s notify delete_sound_ent, deletefakeent y delete
+            if (now >= f.del) {
+                s_ftFollow = false; FtQ(3, f.k, o, nullptr); H19_KillFx(f.fx);
+                o[2] -= 100000.0f; H19_ModelPose(f.j, o, a); f.phase = 0; --s_ftLeft;
+                if (!s_ftLeft) fprintf(stderr, "[H19] flytrap: los objetos se han ido (t=%d)\n", now);
+            }
+            continue;
+        }
+        if (now < f.t0 + f.dur) continue;
+        if (f.phase == 1) { f.phase = 2; FtSpinStep(f, now); continue; }   // wait(4) y empieza a girar
+        if (f.phase == 2) { FtSpinStep(f, now); continue; }
+        if (f.phase == 3) {   // now fly away
+            const float d[3] = { s_flyaway.org[0] + (-100.0f + 200.0f * H19_Rand01()), s_flyaway.org[1], s_flyaway.org[2] };
+            FtMove(f, d, 5.0f, now); FtQ(0, -1, o, "shoot_off"); f.phase = 4; f.del = now + 4700;
+        }
+    }
+}
+
 void Fog(int which, float sec)   // 0 = level_fog_init, 1 = dog_start_monitor, 2 = dog_stop_monitor
 {
     if (!H7C_ClientVolFog) return;
@@ -212,6 +314,7 @@ void Notify(const std::string &ev, int now)
     if (ev.size() == 4 && !ev.compare(0, 3, "scd") && ev[3] >= '0' && ev[3] <= '2') {   // pole_fx_audio
         const int p = ev[3] - '0'; if (!s_polesOn[p]) { s_polesOn[p] = true; for (Pole &q : s_poles[p]) q.next = now; }
     }
+    if (ev == "ag1") FlytrapStart(now);   // flytrap_lev_objects (OLA E1a)
     if (ev == "dog_start") Fog(1, 7.0f);
     if (ev == "dog_stop") Fog(2, 7.0f);
     if (H7_VisionSetNaked && H19_EnvOn("H7E_VISION")) {
@@ -251,6 +354,7 @@ void Frame(int now)
         const float f[3] = { 1, 0, 0 }, u[3] = { 0, 0, 1 }; w.fx = H19_PlayFx("maps/zombie/fx_zombie_wire_spark", p.org, f, u);
         ++w.step; w.next = now + 100;
     }
+    FlytrapFrame(now);
     if (s_rxFlashNext >= 0 && now >= s_rxFlashNext) { LampSet("sm_light_tp_r", s_rxFlashRed ? 2 : 0); s_rxFlashRed = !s_rxFlashRed; s_rxFlashNext = now + 500; }
     if (s_rxGreenAt >= 0 && now >= s_rxGreenAt) { s_rxGreenAt = -1; LampSet("sm_light_tp_r", 1); fprintf(stderr, "[H19] receptor del PaP en verde\n"); }
     for (int i = 0; i < 3; ++i) if (s_polesOn[i]) for (Pole &q : s_poles[i]) if (now >= q.next) {   // realwait(randomintrange(2,7)) = 2..6 s
@@ -381,6 +485,14 @@ void AudioFrame(bool)
     const double now = H19A_NowMs();
     { std::vector<std::pair<std::vector<float>, std::string>> q; { std::lock_guard<std::mutex> g(s_sndMu); q.swap(s_sndQ); }
       for (auto &s : q) PlayAt(s.first.data(), s.second.c_str()); }
+    { std::vector<FtSnd> q; { std::lock_guard<std::mutex> g(s_sndMu); q.swap(s_ftQ); }   // flytrap (OLA E1a)
+      static std::map<int, int> fake;
+      for (const FtSnd &s : q) {
+          if (s.kind == 0) PlayAt(s.org, s.alias.c_str());
+          else if (s.kind == 1) { const int f = H19A_FakeAt(s.org); if (f) { fake[s.slot] = f; H19A_PlayLoop(f, s.alias.c_str(), 0); } }
+          else if (s.kind == 2) { auto it = fake.find(s.slot); if (it != fake.end()) memcpy((float *)H19A_FakeOrg(it->second), s.org, 12); }
+          else if (s.kind == 3) { auto it = fake.find(s.slot); if (it != fake.end()) { H19A_StopLoop(it->second, 0); fake.erase(it); } }
+      } }
     for (AWire &w : s_aw) if (w.step >= 0 && now >= w.next) {   // setfakeentorg cada 0,05 s siguiendo al mover (aqui, al llegar a cada tramo)
         if (w.step >= (int)w.path.size()) { if (w.fake) H19A_StopLoop(w.fake, 0); w.step = -2; continue; }   // deletefakeent
         if (w.fake) memcpy((float *)H19A_FakeOrg(w.fake), w.path[w.step].org, 12);
@@ -412,7 +524,7 @@ void AudioStatus(std::string &out)
 
 extern const H19MapCl kH19_zombie_cod5_factory = {
     .zone = "zombie_cod5_factory", .offEnv = "H19_FACTORY",
-    .estado = "Der Riese: niebla y perros, luces electricas, mapas y cables de los teletransportadores, trampas, postes, megafonia y sonido de corriente (OLA M4)",
+    .estado = "Der Riese: niebla y perros, luces electricas, mapas y cables de los teletransportadores, trampas, postes, megafonia y sonido de corriente (OLA M4); huevo del flytrap (OLA E1a)",
     .init = Init, .levelNotify = LevelNotify, .sysState = nullptr, .frame = Frame, .clockHand = nullptr, .screensFrame = nullptr,
     .levelEffect = nullptr,
 #ifdef H6SND

@@ -150,6 +150,8 @@ static void H5E_PlaceNearActor()
 //   shot                     captura (solo con P4_OUT)
 //   usetn TARGETNAME         (OLA S1) el trigger con ese targetname mas cercano al jugador recibe notify("trigger", jugador),
 //                            como USAR sobre el trigger (para probar la caja/maquinas sin depender de la posicion exacta)
+//   tpsee TX TY TZ [R]       (OLA E1a) al punto con suelo mas cercano desde el que el ojo ve T a <= R (64), mirandolo
+//   tpsee TARGETNAME [R]     (OLA E1a) igual, con T = centro de los limites de la entidad mas cercana con ese targetname
 bool g_h5eViewResync = false;
 int g_h5eUseUntil, g_h5eFireUntil; bool g_h5eShotReq;
 namespace {
@@ -177,9 +179,46 @@ void H5E_Timed()
                 const float from[3] = { o[0], o[1], o[2] + 32.0f }, to[3] = { o[0], o[1], o[2] - 400.0f };
                 trace_t tr; col_context_t ctx; G_TraceCapsule(&tr, from, mins, maxs, to, pl->s.number, 0x2810011, &ctx);
                 if (!tr.startsolid) o[2] = from[2] + (to[2] - from[2]) * tr.fraction + 1.0f;
-                float dir[3] = { tg[0] - o[0], tg[1] - o[1], tg[2] - (o[2] + 60.0f) }, ang[3]; vectoangles(dir, ang); ang[2] = 0;
+                float dir[3] = { tg[0] - o[0], tg[1] - o[1], tg[2] - (o[2] + 60.0f) }, ang[3]; vectoangles(dir, ang); ang[2] = 0; if (ang[0] > 180.0f) ang[0] -= 360.0f;   /* E1a: cabeceo en (-180,180]: la camara recorta 0..360 a 89 */
                 TeleportPlayer(pl, o, ang); g_h5eViewResync = true;
                 fprintf(stderr, "[H5E] guion: jugador en (%.0f,%.0f,%.0f)%s mirando (%.0f,%.0f,%.0f)\n", o[0], o[1], o[2], tr.startsolid ? " (SIN suelo: dentro de solido)" : "", tg[0], tg[1], tg[2]);
+            } }
+        else if (!strcmp(cmd, "tpsee") && pl->r.inuse && pl->client) {   // OLA E1a: tpsee TX TY TZ R: el punto con suelo mas cercano a T
+            // (anillos de 16 a R, 16 direcciones) cuyo ojo (suelo + 60) ve T sin obstaculos y queda a <= R; mirando a T. Para triggers de
+            // uso (alcance 72 desde el centro, player_use_mp) o blancos de disparo sin conocer la geometria.
+            // tpsee TARGETNAME [R]: T = centro de los limites (absmin/absmax) de la entidad con ese targetname mas cercana, que es el punto
+            // al que mira y mide Player_GetUseList (el "origin" del .map no siempre coincide)
+            float tg[3], R = 64.0f; char tn[96] = ""; bool okArgs = sscanf(ta.a.c_str(), "%*s %f %f %f %f", &tg[0], &tg[1], &tg[2], &R) >= 3;
+            if (!okArgs && sscanf(ta.a.c_str(), "%*s %95s %f", tn, &R) >= 1) { float bd2 = 1e30f;
+                for (int i = 0; i < level.num_entities; ++i) { gentity_s *t = &g_entities[i];
+                    if (!t->r.inuse || !t->targetname || strcmp(SL_ConvertToString(t->targetname, SCRIPTINSTANCE_SERVER), tn)) continue;
+                    float c[3], d2 = 0; for (int k = 0; k < 3; ++k) { c[k] = 0.5f * (t->r.absmin[k] + t->r.absmax[k]); d2 += (c[k] - pl->r.currentOrigin[k]) * (c[k] - pl->r.currentOrigin[k]); }
+                    if (d2 < bd2) { bd2 = d2; memcpy(tg, c, 12); okArgs = true; } }
+                if (!okArgs) fprintf(stderr, "[H5E] guion: tpsee %s: no hay entidad con ese targetname\n", tn); }
+            if (okArgs) {
+                const float mins[3] = { -15.0f, -15.0f, 0.0f }, maxs[3] = { 15.0f, 15.0f, 70.0f }, z0[3] = { 0, 0, 0 };
+                float best[3] = { 0, 0, 0 }, bd = 1e30f, bmiss = 1e30f; bool ok = false;
+                for (int pass = 0; pass < 3 && !ok; ++pass)   // 1a: vista limpia (la que exige UseTriggerRequireLookAt); 2a: tolerante; 3a: el menor obstaculo
+                for (float r = 16.0f; r <= R + 0.5f && (!ok || pass == 2); r += 8.0f) for (int k = 0; k < 16; ++k) {
+                    const float a = k * 0.39269908f, o[3] = { tg[0] + r * cosf(a), tg[1] + r * sinf(a), tg[2] };
+                    for (float dz = 160.0f; dz >= -160.0f; dz -= 16.0f) {   // el suelo puede estar por encima o por debajo del blanco
+                        const float from[3] = { o[0], o[1], o[2] + dz }, to[3] = { o[0], o[1], o[2] + dz - 400.0f };
+                        trace_t tr; col_context_t ctx; G_TraceCapsule(&tr, from, mins, maxs, to, pl->s.number, 0x2810011, &ctx);
+                        if (tr.startsolid || tr.allsolid || tr.fraction >= 1.0f) continue;
+                        const float fl = from[2] + (to[2] - from[2]) * tr.fraction + 1.0f, eye[3] = { o[0], o[1], fl + 60.0f };
+                        const float d = sqrtf((eye[0] - tg[0]) * (eye[0] - tg[0]) + (eye[1] - tg[1]) * (eye[1] - tg[1]) + (eye[2] - tg[2]) * (eye[2] - tg[2]));
+                        if (d > R || (pass < 2 && d >= bd)) continue;
+                        trace_t lt; col_context_t c2; G_TraceCapsule(&lt, eye, z0, z0, tg, pl->s.number, 0x2810011, &c2);
+                        const float miss = (1.0f - lt.fraction) * d;   // el blanco puede estar dentro de un modelo con colision (radio, mesa)
+                        if (pass < 2 && lt.fraction < 0.97f && (pass == 0 || miss > 20.0f)) continue;
+                        if (pass == 2) { if (miss >= bmiss) continue; bmiss = miss; }
+                        bd = d; best[0] = o[0]; best[1] = o[1]; best[2] = fl; ok = true;
+                    }
+                }
+                if (ok) { float dir[3] = { tg[0] - best[0], tg[1] - best[1], tg[2] - (best[2] + 60.0f) }, ang[3]; vectoangles(dir, ang); ang[2] = 0; if (ang[0] > 180.0f) ang[0] -= 360.0f;
+                    TeleportPlayer(pl, best, ang); g_h5eViewResync = true; }
+                fprintf(stderr, "[H5E] guion: tpsee (%.0f,%.0f,%.0f) R=%.0f -> %s (%.0f,%.0f,%.0f) a %.0f%s\n", tg[0], tg[1], tg[2], R, ok ? "jugador en" : "SIN punto",
+                    best[0], best[1], best[2], ok ? bd : 0.0f, bmiss < 1e29f ? " (SIN vista limpia: el menor obstaculo)" : "");
             } }
         else if (!strcmp(cmd, "use")) { int ms = 1500; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eUseUntil = level.time + ms; }
         else if (!strcmp(cmd, "fire")) { int ms = 500; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eFireUntil = level.time + ms; }
