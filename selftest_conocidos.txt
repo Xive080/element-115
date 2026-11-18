@@ -19,3 +19,15 @@ Couldn't open techniqueSet 'pimp/techsets/l_sm_bNcN_bNcNnNsN.techset'
 # OLA M3 (Nacht, zombie_cod5_prototype): el ff de los datos del usuario se construyo con errores y el destructible dest_opel_blitz trae physPreset en huesos sin collmap (puertas y capo del camion); el original lo avisa igual y el camion sigue siendo destructible (benigno)
 There were errors when building fast file 'zombie_codN_prototype'
 in destructible file [dest_opel_blitz] model [dest_opel_blitz_full]
+# OLA M10 (Moon, zombie_moon): el ff de los datos del usuario se construyo con errores; el aitype del astronauta pide el material sun_flare_icbm (frag_grenade_zm) que no viene;
+# el snapshot zmb_moon.snapshot.csv no trae oclusion para zmb_gersh_device (avisos de datos, benignos)
+There were errors when building fast file 'zombie_moon'
+Couldn't find material 'sun_flare_icbm'
+zmb_gersh_device has missing occlusion
+# OLA M10 (Moon): huevo (zombie_moon_sq, etapa ctvg): las placas de Cassimir son script_struct con "model" que nadie precachea; SetModel tras la carga da
+# script runtime error y corta solo el hilo del huevo (pendiente: ver si el SP original precachea el "model" de los structs). Las lineas de la pila
+# ("called from"/"started from"/separadores) son el detalle de ese error de script, igual que [HNG-ERRORES].
+model 'p_zom_moon_cassimir_plate' not precached
+[ERROR] called from:
+[ERROR] started from:
+[ERROR] ************************************

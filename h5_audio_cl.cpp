@@ -1225,6 +1225,19 @@ void H19A_PlayLoop(int f, const char *alias, float fadeSec) { FakePlayLoop(f, al
 void H19A_StopLoop(int f, float fadeSec) { FakeStopLoop(f, fadeSec); }
 void H19A_WorldSound(const float *org, const char *alias) { WorldSound(org, alias); }
 gentity_s *H19A_PlayerEnt() { return PlayerEnt(); }
+// OLA M10 (Moon): setAmbientRoomTone / setAmbientRoomSnapshot del CSC del mapa en juego (nullptr = no cambia) y "level.activeAmbientRoom = ''" +
+// updateActiveAmbientRoom (se vuelve a aplicar la sala aunque sea la misma). Se declaran en el mapa que los usa (no en h19_mapcl.h).
+void H19A_RoomSet(const char *room, const char *tone, const char *snapshot, float fadeIn, float fadeOut)
+{
+    auto it = s_rooms.find(room); if (it == s_rooms.end()) return;
+    if (tone) { it->second.tone = tone; it->second.fadeIn = fadeIn; it->second.fadeOut = fadeOut; }
+    if (snapshot) it->second.snapshot = snapshot;
+}
+void H19A_RoomRefresh()
+{
+    if (!s_curRoom.empty() && s_rooms.count(s_curRoom)) FakeStopLoop(s_rooms[s_curRoom].ent, s_rooms[s_curRoom].fadeOut);
+    s_curRoom.clear(); RoomUpdate();
+}
 
 // ---------------------------------------------------------------- frame de audio (h5_play.cpp, una vez por frame de render)
 static void H6A_Frame(bool serverFrame, const float *camOrg, const float *camAng)
