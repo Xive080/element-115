@@ -1109,6 +1109,9 @@ void NoteHook(int entnum, unsigned notifyName, unsigned noteName)
     if (!I_strnicmp(note, "footstep_", 9)) s_footQ.push_back({ entnum, note[9] == 'L' || note[9] == 'l' });
     else if (dog && !I_strnicmp(note, "dogstep_", 8)) s_footQ.push_back({ entnum, note[9] == 'L' || note[9] == 'l' });
 }
+} // namespace
+void H19_AIFootFx(const float *pos, const char *surf, bool onFire) __attribute__((weak));   // h19_mapcl.cpp (OLA E1b)
+namespace {
 void PlayAIFootstep(const gentity_s *e, bool left, bool dog)
 {
     float foot[3]; memcpy(foot, e->r.currentOrigin, 12);
@@ -1122,6 +1125,8 @@ void PlayAIFootstep(const gentity_s *e, bool left, bool dog)
     else snprintf(a, sizeof a, "fly_step_zombie_%s", Com_SurfaceTypeToName((surf >> 20) & 0x3F));
     ++s_aiSteps;
     CG_PlaySound(0, ENTITYNUM_WORLD, foot, 0, 0, 1.0f, a);   // playsound(client, alias, pos): sonido en el mundo
+    // OLA E1b: do_foot_effect (FX por suelo de setFootstepEffect); on_fire = eFlags2 0x200000 (cent->isBurning no existe aqui)
+    if (H19_AIFootFx) H19_AIFootFx(foot, Com_SurfaceTypeToName((surf >> 20) & 0x3F), (e->s.lerp.eFlags2 & 0x200000) != 0);
 }
 // CG_SP_DoAIFootsteps: los pies marcados suenan si el actor esta dentro del corte; fuera se quedan marcados (como cent->leftFootstep)
 void AIFootstepsFrame()

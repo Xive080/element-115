@@ -22,7 +22,10 @@
 //    al azar desde el ojo del jugador, y no repite hasta que acaba (scriptOriginPoolThread); play_meteor_loop (meteor_loop en
 //    (11264, -1920, -592)) y la radio de _waw_zombiemode_radio.csc (clientflag 14 del script_model "sumpf_kzmb", ktr/rrd).
 //    start_lights no se llama en main(): no se reproduce.
-// No se hace: zombify (el GSC de este mapa no lo usa), swamp_german_safe (solo version alemana) ni footsteps (setFootstepEffect).
+// OLA E1b: zombify (registerSystem "zombify": sysState + zombie_grain; el GSC solo lo manda con zombie_vars["zombify_player"],
+//   false aqui, y zombie_grain no esta en level._effect: sin efecto visible, como el original) y los FX de pasos de la IA
+//   (setFootstepEffect, comun en h19_mapcl.cpp). Tirolina, caja, telefono/vater, radios, superhuevo, battle/whisper, libro y meteorito
+//   son solo GSC (probados). No se hace: swamp_german_safe (solo version alemana).
 //   H19_SUMPF=0 lo apaga. Pruebas: H19_SUMPF_RADIO="ms,ms..." dispara "damage" en la radio en esos level.time (como dispararle).
 #ifdef H5G
 #include <universal/q_shared.h>
@@ -56,6 +59,7 @@
 bool H7_VisionSetNaked(const char *name, float seconds) __attribute__((weak));   // h7_gfx.cpp
 void H7C_ClientVolFog(const float *v, int transitionMs) __attribute__((weak));     // h7c_gfx.cpp: setVolFog del CSC
 void __cdecl SV_GetConfigstring(unsigned int index, char *buffer, int bufferSize);
+void __cdecl SV_GameSendServerCommand(int clientNum, svscmd_type type, const char *text);   // sv_game (H19_SUMPF_ZOMBIFY)
 void H4_GetCam(float *org, float *ang);                                         // world_h4.cpp
 const FxEffectDef *__cdecl FX_Register(char *name);                             // h5_fx.cpp
 extern FxSystemContainer *fx_systemPool;                                        // fx_system.cpp (lo reserva h5_fx)
@@ -241,10 +245,52 @@ bool LevelNotify(const std::string &ev, int now)
     return false;   // los mezcladores genericos siguen
 }
 
-void Frame(int)
+// ---- zombify (zombie_cod5_sumpf.csc registerSystem("zombify", ::zombifyHandler) / zombie_monitor)
+// El servidor lo manda en zombify_player (_zombiemode.gsc) solo con level.zombie_vars["zombify_player"], que este mapa deja en false
+// (como todos): en una partida normal no llega nunca. Con "1" zombie_monitor hace playfx(zombie_grain, origen) cada 0.1 s; en Shi No
+// Numa level._effect["zombie_grain"] no esta definido en ningun .csc, asi que (igual que en el original) no se ve nada.
+bool s_zombify; int s_grainAt;
+bool SysState(const char *sys, const std::string &st, int now)
+{
+    if (strcmp(sys, "zombify")) return false;
+    if (st == "1" && !s_zombify) { s_zombify = true; s_grainAt = now; fprintf(stderr, "[H19] Shi No Numa: zombify on (zombie_grain %s) t=%d\n", s_effect.count("zombie_grain") ? "si" : "NO definido en level._effect", now); }
+    else if (st == "0" && s_zombify) { s_zombify = false; fprintf(stderr, "[H19] Shi No Numa: zombify off t=%d\n", now); }
+    return true;
+}
+void ZombifyFrame(int now)
+{
+    if (const char *e = getenv("H19_SUMPF_ZOMBIFY")) {   // prueba: "ms_on,ms_off" manda el '9' de GScr_ClientSysSetState("zombify") como el servidor
+        static int t[2] = { -1, -1 }; static bool parsed; if (!parsed) { parsed = true; sscanf(e, "%d,%d", &t[0], &t[1]); }
+        for (int k = 0; k < 2; ++k) if (t[k] >= 0 && level.time >= t[k]) { t[k] = -1;
+            for (int i = 0; i <= 8; ++i) { char cs[1024]; SV_GetConfigstring(i + 1538, cs, sizeof cs);
+                if (cs[0] && !strcmp(Info_ValueForKey(cs, "n"), "zombify")) { char c[64]; snprintf(c, sizeof c, "%c %i \\s\\%d", 57, i, k ? 0 : 1);
+                    SV_GameSendServerCommand(-1, SV_CMD_RELIABLE, c); fprintf(stderr, "[H19] H19_SUMPF_ZOMBIFY: '%s' (sistema %d) t=%d\n", c, i, level.time); } } }
+    }
+    if (!s_zombify || now < s_grainAt) return;
+    s_grainAt = now + 100;   // realwait(0.1)
+    auto it = s_effect.find("zombie_grain"); if (it == s_effect.end()) return;
+    static const float a[3] = { 270, 0, 0 };   // playfx de 3 parametros: CScr_SetFxAngles(0) = (270, 0, 0)
+    H19_PlayFxAng(it->second.c_str(), g_entities[0].r.currentOrigin, a);
+}
+
+// ---- diagnostico de la tirolina (H19_SUMPF_ZIPLOG=1): posicion de la plataforma "zipline" y del jugador cada segundo
+void ZipLog(int now)
+{
+    static const bool on = getenv("H19_SUMPF_ZIPLOG") && atoi(getenv("H19_SUMPF_ZIPLOG"));
+    static int next; if (!on || now < next) return; next = now + 1000;
+    static int zip = -2; if (zip == -2) { zip = -1; for (int e = 0; e < level.num_entities; ++e) { gentity_s *g = &g_entities[e];
+        if (g->r.inuse && g->targetname && !strcmp(SL_ConvertToString(g->targetname, SCRIPTINSTANCE_SERVER), "zipline")) { zip = e; break; } } }
+    const gentity_s *pl = &g_entities[0], *z = zip >= 0 ? &g_entities[zip] : nullptr;
+    fprintf(stderr, "[H19Z] t=%d tirolina (%.0f,%.0f,%.0f) jugador (%.0f,%.0f,%.0f) enlazado %d\n", now, z ? z->r.currentOrigin[0] : 0.f, z ? z->r.currentOrigin[1] : 0.f,
+        z ? z->r.currentOrigin[2] : 0.f, pl->r.currentOrigin[0], pl->r.currentOrigin[1], pl->r.currentOrigin[2], pl->client ? (pl->client->ps.eFlags & 0x4000) != 0 : -1);
+}
+
+void Frame(int now)
 {
     VisionPoll();
     CreateFxFrame();
+    ZombifyFrame(now);
+    ZipLog(now);
 }
 
 // ===================================================================================================== sonido
@@ -425,8 +471,8 @@ void AudioStatus(std::string &out)
 
 extern const H19MapCl kH19_zombie_cod5_sumpf = {
     .zone = "zombie_cod5_sumpf", .offEnv = "H19_SUMPF",
-    .estado = "Shi No Numa: vision CS1550, niebla y perros, createfx del pantano, trampas electricas, paquetes de ambiente, meteorito y radio (OLA M5)",
-    .init = Init, .levelNotify = LevelNotify, .sysState = nullptr, .frame = Frame, .clockHand = nullptr, .screensFrame = nullptr,
+    .estado = "Shi No Numa: vision CS1550, niebla y perros, createfx del pantano, trampas electricas, paquetes de ambiente, meteorito y radio (OLA M5), zombify y pasos (OLA E1b)",
+    .init = Init, .levelNotify = LevelNotify, .sysState = SysState, .frame = Frame, .clockHand = nullptr, .screensFrame = nullptr,
     .levelEffect = nullptr,
 #ifdef H6SND
     .audioStart = AudioStart, .audioNotify = AudioNotify, .audioSys = AudioSys, .audioFrame = AudioFrame, .audioStatus = AudioStatus,

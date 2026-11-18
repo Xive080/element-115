@@ -107,4 +107,62 @@ void H19_KillFx(unsigned &h)
 #endif
     h = 0;
 }
+
+// ---- OLA E1b: efecto de los pasos de la IA (_footsteps.csc do_foot_effect), comun a los mapas que llaman setFootstepEffect
+// En el original playAIFootstep (CG_SP_PlayAIFootstep -> script) acaba en do_foot_effect: si el tipo de suelo esta en
+// level._optionalStepEffects juega level._effect["step_" + suelo] con playfx(cl, fx, pos, pos + (0,0,100)) (4 parametros:
+// CScr_PlayFX normaliza ese "forward" y CScr_SetFxAngles(1) = vectoangles; el original pasa la POSICION + 100 como forward, se
+// reproduce igual). Con on_fire el suelo pasa a "fire" (ningun mapa lo registra: no sale nada). La tabla sale de las llamadas
+// setFootstepEffect("suelo", LoadFx("ruta")) del rawfile clientscripts/<mapa>_fx.csc (Nacht, Verruckt, Shi No Numa, Der Riese).
+// h5_audio_cl (frame de servidor) llama H19_AIFootFx con el punto y el suelo; aqui se encola y H19_FootFxFrame (frame de render,
+// h7e_light) los lanza. H19_FOOTFX=0 lo apaga.
+#include <zlib.h>
+namespace {
+std::map<std::string, std::string> s_stepFx; bool s_stepFxRead;
+struct StepQ { float pos[3]; std::string surf; };
+std::vector<StepQ> s_stepQ; int s_stepPlayed;
+void ReadStepFx()
+{
+    s_stepFxRead = true;
+    const char *mn = Dvar_GetString("mapname"); if (!mn || !*mn) { s_stepFxRead = false; return; }
+    char nm[160]; snprintf(nm, sizeof nm, "clientscripts/%s_fx.csc", mn);
+    RawFile *rf = DB_FindXAssetHeader(ASSET_TYPE_RAWFILE, nm, 0, -1).rawfile;
+    if (!rf || !rf->buffer.get()) return;
+    const unsigned *hd = (const unsigned *)rf->buffer.get(); uLongf len = hd[0];
+    std::vector<unsigned char> out(len + 1);
+    if (uncompress(out.data(), &len, (const unsigned char *)(hd + 2), hd[1]) != Z_OK) return;
+    const std::string t((const char *)out.data(), len);
+    for (size_t p = 0; (p = t.find("setFootstepEffect", p)) != std::string::npos; ) {
+        const size_t nl = t.find('\n', p); p += 17;
+        size_t a = t.find('"', p), b = a == std::string::npos ? a : t.find('"', a + 1);
+        size_t lf = t.find("LoadFx", p); if (lf == std::string::npos) lf = t.find("loadfx", p);
+        if (b == std::string::npos || lf == std::string::npos || (nl != std::string::npos && lf > nl)) continue;
+        size_t c = t.find('"', lf), d = c == std::string::npos ? c : t.find('"', c + 1);
+        if (d == std::string::npos) continue;
+        s_stepFx[t.substr(a + 1, b - a - 1)] = t.substr(c + 1, d - c - 1);
+    }
+    fprintf(stderr, "[H19] pasos de la IA: %zu setFootstepEffect en %s\n", s_stepFx.size(), nm);
+}
+}
+void H19_AIFootFx(const float *pos, const char *surf, bool onFire)
+{
+    static const bool on = H19_EnvOn("H19_FOOTFX"); if (!on) return;
+    if (!s_stepFxRead) ReadStepFx();
+    if (s_stepFx.empty()) return;
+    if (s_stepQ.size() >= 64) s_stepQ.erase(s_stepQ.begin());   // sin frame de render no crece
+    StepQ q; memcpy(q.pos, pos, 12); q.surf = onFire ? "fire" : (surf ? surf : ""); s_stepQ.push_back(q);
+}
+void H19_FootFxFrame()
+{
+    for (const StepQ &q : s_stepQ) {
+        auto it = s_stepFx.find(q.surf); if (it == s_stepFx.end()) continue;
+        float f[3] = { q.pos[0], q.pos[1], q.pos[2] + 100.0f }, ang[3];
+        if (Vec3Normalize(f) == 0.0f) continue;
+        vectoangles(f, ang);
+        H19_PlayFxAng(it->second.c_str(), q.pos, ang);
+        if (++s_stepPlayed == 1 || s_stepPlayed % 200 == 0)
+            fprintf(stderr, "[H19] pasos de la IA: %d efectos (ultimo '%s' en %s)\n", s_stepPlayed, it->second.c_str(), q.surf.c_str());
+    }
+    s_stepQ.clear();
+}
 #endif

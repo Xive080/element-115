@@ -560,6 +560,7 @@ void H7E_ClientFrame()
     float cam[3], ang[3]; H4_GetCam(cam, ang);
     LightsFrame(now, dt, cam);
     ClocksFrame();   // OLA 15F: agujas de los relojes
+    { extern void H19_FootFxFrame() __attribute__((weak)); if (H19_FootFxFrame) H19_FootFxFrame(); }   // OLA E1b: efectos de los pasos de la IA (h19_mapcl.cpp)
     if (const H19MapCl *mc = H19_Map()) if (mc->frame) mc->frame(now);   // OLA M2: frame del mapa (antes KinoFrame, OLA M1)
     {   // H7E_NOTIFY="ms:evento,..." (prueba): inyecta levelNotify de cliente (p.ej. "100:vis3") como si llegaran del servidor
         static std::vector<std::pair<int, std::string>> q; static bool parsed;
