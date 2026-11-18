@@ -31,3 +31,5 @@ model 'p_zom_moon_cassimir_plate' not precached
 [ERROR] called from:
 [ERROR] started from:
 [ERROR] ************************************
+# OLA S1: con H5_DEV=1 (solo pruebas con devgui) el original ejecuta devgui_zombie.cfg, que no viene en los datos del usuario (benigno, como devgui_fx)
+[ERROR] couldn't exec devgui_zombie

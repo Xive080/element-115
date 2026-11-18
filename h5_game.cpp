@@ -199,6 +199,7 @@ void H5V_DrawActorsShadow(const float *org, float radius, unsigned char techType
     const int a = g_h5vActors, s = g_h5vSurfs;
     H5V_DrawActors(techType);
     g_h5vActors = a; g_h5vSurfs = s; s_h5vShadowOrg = nullptr;
+    { void H20_DrawShadow(const float *, float, unsigned char); H20_DrawShadow(org, radius, techType); }   // OLA S1: script_model del servidor (h20_svmodels.cpp)
 }
 // Camara del render: H5_VIEW_CAM=player (ojo y angulos del jugador del servidor), look (ojo del jugador mirando al actor mas
 // cercano: por defecto), near (a H5_VIEW_DIST unidades del actor mas cercano, delante de el, mirandolo)
@@ -379,6 +380,7 @@ int H5G_Run()
         H15_MemPhase("carga_render");
         if (!H4_Setup(W, H)) { fprintf(stderr, "[H5V] sin GfxWorld\n"); return 1; }
         g_h4DrawExtra = H5V_DrawActors;
+        { void H20_Install(); H20_Install(); }   // OLA S1: script_model del servidor (CG_ScriptMover/CG_General) tras los actores, antes de cristales/FX/viewmodel
         { void H8_InstallDraw(); H8_InstallDraw(); }   // OLA 8: cristales con su colocacion (h8_doors.cpp), antes de FX y viewmodel
 #ifdef H5FX
         { void H5FX_InstallDraw(); H5FX_InstallDraw(); }   // OLA 6c: FX entre actores y viewmodel (h5_fx.cpp)

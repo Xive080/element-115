@@ -32,7 +32,9 @@ rc=$?; wall=$((SECONDS - t0))
 # log filtrado (el completo puede ser grande: se queda solo si falla)
 grep -aE "^\[(H5F|H15MEM\] FASE|H6A\] (wma|sin|FALTA)|v9budget|SIGNAL|P4\] backend|H13|H12)|STUB|ASSERT|abort|FATAL|memguard" "$D/juego_completo.log" | head -c 20000000 > "$D/juego.log"
 PAT='\[SIGNAL|STUB|ASSERT|abort\(\)|FATAL|TOPE .*SUPERADO|RITMO DE SUBIDA SUPERADO|RECHAZADO|ERROR|[Ee]rror:|CORRUPTO|FALTA '
-grep -aE "$PAT" "$D/juego_completo.log" | grep -avE '^\[ERROR\] *$' | sed -E 's/[0-9]+/N/g' | sort   # OLA M10: sin los separadores vacios de la pila de un error de script | uniq -c | sort -rn > "$D/errores_todos.txt"
+# OLA M10: sin los separadores vacios de la pila de un error de script. OLA S1: el comentario de M10 estaba en medio de la tuberia y dejaba
+# sin errores_todos.txt (la comprobacion de errores nuevos no miraba nada)
+grep -aE "$PAT" "$D/juego_completo.log" | grep -avE '^\[ERROR\] *$' | sed -E 's/[0-9]+/N/g' | sort | uniq -c | sort -rn > "$D/errores_todos.txt"
 KN=$HERE/selftest_conocidos.txt; : > "$D/errores.txt"
 while IFS= read -r l; do t=${l#*[0-9] }; m=0; [ -f "$KN" ] && while IFS= read -r k; do [ -z "$k" ] || [ "${k#\#}" != "$k" ] && continue; case "$t" in *"$k"*) m=1; break;; esac; done < "$KN"; [ $m = 0 ] && echo "$l" >> "$D/errores.txt"; done < "$D/errores_todos.txt"
 # capturas: todas las que dejo el juego, renombradas por orden

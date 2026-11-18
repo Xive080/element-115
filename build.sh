@@ -84,7 +84,7 @@ if [ -n "$H5G" ]; then
   for b in $H5Q; do srcs="$srcs $Z/src/$b.cpp"; done
   srcs="$srcs $H/harness2/h10_settings.cpp"   # OLA 10: menu de ajustes original + perfil de calidad + config
   for f in $H/harness2/h11_net.cpp $H/harness2/h11_net_cl.cpp $H/harness2/h11_lobby.cpp; do case " $EXTRA " in *"$(basename $f)"*) ;; *) srcs="$srcs $f";; esac; done   # OLA 11: red co-op (inerte sin H11_HOST/H11_CONNECT); OLA C1: menu y arranque de partida local
-  srcs="$srcs $H/harness2/h5_game.cpp $H/harness2/h5_weapon.cpp $H/harness2/h5_play.cpp $H/harness2/h8_doors.cpp $H/harness2/h12_barrier.cpp ${H8_XSRC}"
+  srcs="$srcs $H/harness2/h5_game.cpp $H/harness2/h5_weapon.cpp $H/harness2/h5_play.cpp $H/harness2/h8_doors.cpp $H/harness2/h12_barrier.cpp $H/harness2/h20_svmodels.cpp ${H8_XSRC}"   # OLA S1: h20 = script_model del servidor en el render
   for f in $H/harness2/h19_mapcl.cpp $H/harness2/maps/h19_*.cpp; do srcs="$srcs $f"; done   # OLA M2: cliente de cada mapa (tabla en h19_mapcl.cpp, un fichero por mapa)
   [ -n "$H12GLASS" ] && srcs="$srcs $Z/src/glass/glass_client.cpp $Z/src/glass/glass_renderer.cpp $Z/src/glass/glass_shard.cpp $Z/src/glass/glass_allocator.cpp $H/harness2/h12_glasscl.cpp"   # OLA 12: cliente de cristal original (fragmentos GlassShard)   # OLA 8 (H8_XSRC: fuentes extra para pruebas)   # h5_weapon: H5e (arma, viewmodel, registro [H5E])
   srcs="$srcs $Z/src/cgame/cg_weapons.cpp"   # H5e: viewmodel/animacion de arma del cliente ORIGINAL

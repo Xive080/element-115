@@ -34,6 +34,8 @@ static inline void *H5_AlignedAlloc(size_t a, size_t n) { void *p = nullptr; ret
 #include <game_mp/g_utils_mp.h>
 #include <game_mp/g_misc_mp.h>
 #include <clientscript/scr_const.h>
+#include <clientscript/cscr_stringlist.h>
+#include <game_mp/g_spawn_mp.h>
 #include <universal/com_math.h>
 
 static int g_h5eShots, g_h5eHits, g_h5eActorHits, g_h5eDamage, g_h5eKills, g_h5eReloads, g_h5eLogged;
@@ -146,6 +148,8 @@ static void H5E_PlaceNearActor()
 //   use MS                   mantiene USAR (bit 3 del usercmd) MS milisegundos: la compra/accion la hace el GSC original
 //   fire MS                  mantiene DISPARO MS milisegundos
 //   shot                     captura (solo con P4_OUT)
+//   usetn TARGETNAME         (OLA S1) el trigger con ese targetname mas cercano al jugador recibe notify("trigger", jugador),
+//                            como USAR sobre el trigger (para probar la caja/maquinas sin depender de la posicion exacta)
 bool g_h5eViewResync = false;
 int g_h5eUseUntil, g_h5eFireUntil; bool g_h5eShotReq;
 namespace {
@@ -180,6 +184,14 @@ void H5E_Timed()
         else if (!strcmp(cmd, "use")) { int ms = 1500; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eUseUntil = level.time + ms; }
         else if (!strcmp(cmd, "fire")) { int ms = 500; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eFireUntil = level.time + ms; }
         else if (!strcmp(cmd, "shot")) g_h5eShotReq = true;
+        else if (!strcmp(cmd, "usetn") && pl->r.inuse) {   // OLA S1: usetn TARGETNAME -> el trigger con ese targetname mas cercano recibe "trigger" del jugador
+            char tn[96] = ""; sscanf(ta.a.c_str(), "%*s %95s", tn); gentity_s *best = nullptr; float bd = 1e30f;
+            for (int i = 0; i < level.num_entities; ++i) { gentity_s *t = &g_entities[i];
+                if (!t->r.inuse || !t->targetname || strcmp(SL_ConvertToString(t->targetname, SCRIPTINSTANCE_SERVER), tn)) continue;
+                float d = 0; for (int k = 0; k < 3; ++k) d += (t->r.currentOrigin[k] - pl->r.currentOrigin[k]) * (t->r.currentOrigin[k] - pl->r.currentOrigin[k]);
+                if (d < bd) { bd = d; best = t; } }
+            if (best) { Scr_AddEntity(pl, SCRIPTINSTANCE_SERVER); Scr_Notify(best, scr_const.trigger, 1); }
+            fprintf(stderr, "[H5E] guion: usetn %s -> %s\n", tn, best ? "notify trigger" : "NO hay entidad con ese targetname"); }
         fprintf(stderr, "[H5E] t=%d guion: %s\n", level.time, ta.a.c_str());
     }
 }
