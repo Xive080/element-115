@@ -26,6 +26,8 @@
 //  - OLA E3a: sacudidas de cliente (Earthquake de los .csc): lander_rumble_and_quake (bandera 7 del jugador: al subir una, luego cada
 //    0,1 s segun la distancia al lander, y al aterrizar dos mas) y el grito de Samantha ("sia", 0,4 durante 10 s). Agujero negro (Gersh)
 //    en maps/h19_weap_black_hole_bomb.cpp (comun con Moon); aqui solo su vision zombie_black_hole (prioridad 10, 2 s).
+//    Validado en el Mac (docs/evidencia/e3a): lander y viajes, cohete y RX, PaP, centrifuga, radios, osos, munecas y la cadena de
+//    Samantha 1-6 entera (recompensa Death Machine y "sia"). La "superficie lila" no es del render: es la camara dentro de un solido.
 // No se hace (anotado en docs/evidencia/m9/LEEME.md): PlayRumbleOnEntity (sin
 // vibracion), snd_set_snapshot del grito de Samantha, soul_pull de la bandera 0 de actor (level.nml_spark_pull no esta en los datos, el
 // original tambien falla), barreras electricas de No Man's Land (nml_build_sparks no estan en los datos y el servidor no manda eb+),
