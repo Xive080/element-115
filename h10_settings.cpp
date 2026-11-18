@@ -363,6 +363,39 @@ int __cdecl CL_GetKeyBinding(int, const char *command, char (*keyNames)[128], in
     return n;
 }
 int __cdecl Key_IsDown(int, int keynum) { return keynum >= 0 && keynum < 256 && s_keyDown[keynum]; }
+// OLA M7: Key_StringToKeynum (cl_keys.cpp, copia del original con su tabla keynames: genstubs deja a cero los datos de TUs sin compilar).
+// La llama el SERVIDOR al leer los ficheros de vehiculo (G_LoadVehicle -> KeyValueToField, campos de tecla): Shangri-La trae un
+// script_vehicle y sin ella el stub abortaba al cargar el mapa.
+int __cdecl Key_StringToKeynum(const char *str)
+{
+    struct KN { const char *name; int keynum; };
+    static const KN kn[] = {
+        { "TAB", 9 }, { "ENTER", 13 }, { "ESCAPE", 27 }, { "SPACE", 32 }, { "BACKSPACE", 127 }, { "UPARROW", 154 }, { "DOWNARROW", 155 },
+        { "LEFTARROW", 156 }, { "RIGHTARROW", 157 }, { "ALT", 158 }, { "CTRL", 159 }, { "SHIFT", 160 }, { "CAPSLOCK", 151 }, { "F1", 167 },
+        { "F2", 168 }, { "F3", 169 }, { "F4", 170 }, { "F5", 171 }, { "F6", 172 }, { "F7", 173 }, { "F8", 174 }, { "F9", 175 }, { "F10", 176 },
+        { "F11", 177 }, { "F12", 178 }, { "INS", 161 }, { "DEL", 162 }, { "PGDN", 163 }, { "PGUP", 164 }, { "HOME", 165 }, { "END", 166 },
+        { "MOUSE1", 200 }, { "MOUSE2", 201 }, { "MOUSE3", 202 }, { "MOUSE4", 203 }, { "MOUSE5", 204 }, { "MWHEELUP", 206 }, { "MWHEELDOWN", 205 },
+        { "BUTTON_A", 1 }, { "BUTTON_B", 2 }, { "BUTTON_X", 3 }, { "BUTTON_Y", 4 }, { "BUTTON_LSHLDR", 5 }, { "BUTTON_RSHLDR", 6 },
+        { "BUTTON_START", 14 }, { "BUTTON_BACK", 15 }, { "BUTTON_LSTICK", 16 }, { "BUTTON_RSTICK", 17 }, { "BUTTON_RTRIG", 19 },
+        { "BUTTON_LTRIG", 18 }, { "DPAD_UP", 20 }, { "DPAD_DOWN", 21 }, { "DPAD_LEFT", 22 }, { "DPAD_RIGHT", 23 }, { "APAD_UP", 28 },
+        { "APAD_DOWN", 29 }, { "APAD_LEFT", 30 }, { "APAD_RIGHT", 31 }, { "AUX1", 207 }, { "AUX2", 208 }, { "AUX3", 209 }, { "AUX4", 210 },
+        { "AUX5", 211 }, { "AUX6", 212 }, { "AUX7", 213 }, { "AUX8", 214 }, { "AUX9", 215 }, { "AUX10", 216 }, { "AUX11", 217 }, { "AUX12", 218 },
+        { "AUX13", 219 }, { "AUX14", 220 }, { "AUX15", 221 }, { "AUX16", 222 }, { "KP_HOME", 182 }, { "KP_UPARROW", 183 }, { "KP_PGUP", 184 },
+        { "KP_LEFTARROW", 185 }, { "KP_5", 186 }, { "KP_RIGHTARROW", 187 }, { "KP_END", 188 }, { "KP_DOWNARROW", 189 }, { "KP_PGDN", 190 },
+        { "KP_ENTER", 191 }, { "KP_INS", 192 }, { "KP_DEL", 193 }, { "KP_SLASH", 194 }, { "KP_MINUS", 195 }, { "KP_PLUS", 196 },
+        { "KP_NUMLOCK", 197 }, { "KP_STAR", 198 }, { "KP_EQUALS", 199 }, { "PAUSE", 153 }, { "SEMICOLON", 59 }, { "COMMAND", 150 },
+        { "181", 128 }, { "191", 129 }, { "223", 130 }, { "224", 131 }, { "225", 132 }, { "228", 133 }, { "229", 134 }, { "230", 135 },
+        { "231", 136 }, { "232", 137 }, { "233", 138 }, { "236", 139 }, { "241", 140 }, { "242", 141 }, { "243", 142 }, { "246", 143 },
+        { "248", 144 }, { "249", 145 }, { "250", 146 }, { "252", 147 }, { nullptr, 0 } };
+    if (!str || !*str) return -1;
+    if (!str[1]) return *str;
+    if (str[0] == '0' && str[1] == 'x' && strlen(str) == 4) {   // "0xNN" (solo cifras y a-f minusculas, como el original)
+        auto hx = [](int c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : 0; };
+        return hx(str[3]) + 16 * hx(str[2]);
+    }
+    for (const KN *k = kn; k->name; ++k) if (!I_stricmp(str, k->name)) return k->keynum;
+    return -1;
+}
 void H10_Key(int key, bool down)
 {
     if (key >= 0 && key < 256) s_keyDown[key] = down;

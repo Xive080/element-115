@@ -634,6 +634,23 @@ int H19_SwapModelByTn(const char *tn, const char *from, const char *to)
 void H19_MixerActivate(const std::string &ev, int now) { MixerActivate(ev, now); }
 void H19_LevelNotify(const std::string &ev, int now) { LevelNotify(ev, now); }
 float H19_Rand01() { return Rand01(); }
+// OLA M7: pose de los script_model de cliente que mueve un mapa (moveto/rotateto/rotatepitch del CSC: lanzas y laberinto de Shangri-La...).
+// Se declaran en el mapa que los usa (no en h19_mapcl.h, que recompila todo). nullptr / false si el indice no existe.
+int H19_ModelCount() { return (int)s_models.size(); }
+const char *H19_ModelTn(int j) { return j >= 0 && j < (int)s_models.size() ? s_models[j].tn.c_str() : nullptr; }
+const char *H19_ModelName(int j) { return j >= 0 && j < (int)s_models.size() ? s_models[j].name.c_str() : nullptr; }
+bool H19_ModelGet(int j, float *org, float *ang)
+{
+    if (j < 0 || j >= (int)s_models.size()) return false;
+    if (org) memcpy(org, s_models[j].org, 12); if (ang) memcpy(ang, s_models[j].ang, 12); return true;
+}
+void H19_ModelPose(int j, const float *org, const float *ang)   // org y ang a la vez; los vertices en mundo se recalculan
+{
+    if (j < 0 || j >= (int)s_models.size()) return;
+    ClModel &m = s_models[j];
+    if (!memcmp(m.org, org, 12) && !memcmp(m.ang, ang, 12)) return;
+    memcpy(m.org, org, 12); SetPose(j, ang);
+}
 #else
 void H7E_ClientFrame() {}
 #endif
