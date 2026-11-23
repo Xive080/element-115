@@ -165,6 +165,10 @@ static void H5P_CmdButtons(client_t *bot, usercmd_s *cmd)
     }
     if (s_pendingWeapon && (s_pendingWeapon == ps->weapon || !BG_PlayerHasWeapon(ps, s_pendingWeapon))) s_pendingWeapon = 0;
     cmd->weapon = s_pendingWeapon ? s_pendingWeapon : (ps->weapon ? ps->weapon : bot->lastUsercmd.weapon);
+    // OLA F1: un arma de modo alterno (microwavegun_zm de microwavegundw_zm) solo se queda si el usercmd nombra su primaria
+    // (cl_input_mp: cmd->lastWeaponAltModeSwitch = cgameUserCmdLastWeaponForAlt); sin ella PM_Weapon_FinishWeaponChange la deja en 0
+    if (cmd->weapon && BG_GetWeaponDef(cmd->weapon)->inventoryType == WEAPINVENTORY_ALTMODE)
+        cmd->lastWeaponAltModeSwitch = ps->weapon && BG_GetWeaponDef(ps->weapon)->inventoryType != WEAPINVENTORY_ALTMODE ? ps->weapon : ps->lastWeaponAltModeSwitch;
     s_latched = 0; s_latchedWeapon = 0;
 }
 

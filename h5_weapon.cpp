@@ -20,6 +20,7 @@
 #include <game_mp/actor_mp.h>
 #include <bgame/bg_weapons.h>
 #include <bgame/bg_weapons_def.h>
+#include <bgame/bg_misc.h>   // OLA F1: BG_PlayerHasWeapon (log de "weap")
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -155,9 +156,12 @@ static void H5E_PlaceNearActor()
 //                            como USAR sobre el trigger (para probar la caja/maquinas sin depender de la posicion exacta)
 //   tpsee TX TY TZ [R]       (OLA E1a) al punto con suelo mas cercano desde el que el ojo ve T a <= R (64), mirandolo
 //   tpsee TARGETNAME [R]     (OLA E1a) igual, con T = centro de los limites de la entidad mas cercana con ese targetname
+//                            (OLA F1: o con ese nombre de modelo, para objetos sin targetname como el carrete de Moon)
+//   ads [MS]                 (OLA F1) mantiene APUNTAR (bit 11 del usercmd) MS (1000) ms
 //   jump|melee|frag [MS]     (OLA E2b) mantiene salto (bit 10), cuchillo (bit 2) o granada letal (bit 14) MS ms (200/200/300)
 //   tact [MS]                (OLA E3a) mantiene el boton de la granada tactica (bit 15 del usercmd) MS (300) ms
-//   weap NOMBRE              (OLA E3a) cambia al arma NOMBRE si el jugador la tiene (como elegirla con weapnext)
+//   weap NOMBRE              (OLA E3a) cambia al arma NOMBRE si el jugador la tiene (como elegirla con weapnext); OLA F1: el log
+//                            dice el arma en mano, su alternativa y las heldWeapons (vale tambien para el modo alterno)
 //   dispara X Y Z|yo R MS    (OLA F1) apunta y dispara al actor vivo mas cercano en planta (H5E_DisparaFrame)
 //   acude X Y Z [X Y Z...]   (OLA F1) acude con USAR a un bucle de sonido que aparezca junto a uno de los puntos (H5E_AcudeFrame)
 //   municion ARMA N          (OLA F1) Add_Ammo al jugador (granadas, cargador)
@@ -307,10 +311,16 @@ void H5E_Timed()
             int ms = !strcmp(cmd, "frag") ? 300 : 200; sscanf(ta.a.c_str(), "%*s %d", &ms);
             g_h5eBtnUntil[cmd[0] == 'j' ? 10 : cmd[0] == 'm' ? 2 : 14] = level.time + ms; }
         else if (!strcmp(cmd, "weap")) { char wn[64] = ""; sscanf(ta.a.c_str(), "%*s %63s", wn); g_h5eWeapReq = (unsigned)BG_GetWeaponIndexForName(wn);   // OLA E3a: cambiar al arma
-            { bool BG_PlayerHasWeapon(const playerState_s *, unsigned int);   // OLA F1: arma alternativa de la actual (y si esta en heldWeapons)
+            {   // OLA F1: arma alternativa de la actual (y si esta en heldWeapons)
               const unsigned cw = pl->client ? pl->client->ps.weapon : 0, alt = cw ? BG_GetWeaponVariantDef(cw)->altWeaponIndex : 0;
-              fprintf(stderr, "[H5E] guion: weap %s -> %u (actual %s estado %d, alternativa %s %s)\n", wn, g_h5eWeapReq, cw ? BG_WeaponName(cw) : "-",
-                  pl->client ? (int)pl->client->ps.weaponstate : -1, alt ? BG_WeaponName(alt) : "-", alt && BG_PlayerHasWeapon(&pl->client->ps, alt) ? "en mano" : "NO llevada"); } }
+              fprintf(stderr, "[H5E] guion: weap %s -> %u (actual %s estado %d, alternativa %s %s; pedida %s)\n", wn, g_h5eWeapReq, cw ? BG_WeaponName(cw) : "-",
+                  pl->client ? (int)pl->client->ps.weaponstate : -1, alt ? BG_WeaponName(alt) : "-", alt && BG_PlayerHasWeapon(&pl->client->ps, alt) ? "en mano" : "NO llevada",
+                  g_h5eWeapReq && pl->client && BG_PlayerHasWeapon(&pl->client->ps, g_h5eWeapReq) ? "en heldWeapons" : "NO en heldWeapons");
+              std::string hw; for (int s = 0; pl->client && s < 15; ++s) if (const unsigned w = pl->client->ps.heldWeapons[s].weapon) { hw += ' '; hw += BG_WeaponName(w); }
+              const WeaponDef *rd = g_h5eWeapReq ? BG_GetWeaponDef(g_h5eWeapReq) : nullptr;
+              fprintf(stderr, "[H5E] guion: heldWeapons:%s | pm_flags %x weapFlags %x | pedida: clase %d inventario %d modelo %s\n", hw.c_str(),
+                  pl->client ? (unsigned)pl->client->ps.pm_flags : 0u, pl->client ? (unsigned)pl->client->ps.weapFlags : 0u,
+                  rd ? (int)rd->weapClass : -1, rd ? (int)rd->inventoryType : -1, rd && rd->gunXModel[0] ? "si" : "NO"); } }
         else if (!strcmp(cmd, "municion") && pl->client) {   // OLA F1: municion ARMA N -> Add_Ammo (g_items.cpp), p. ej. granadas para la granada santa
             char wn[64] = ""; int n = 1; sscanf(ta.a.c_str(), "%*s %63s %d", wn, &n);
             const unsigned wi = (unsigned)BG_GetWeaponIndexForName(wn);

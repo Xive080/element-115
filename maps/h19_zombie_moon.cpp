@@ -20,16 +20,18 @@
 //  - radar_dish_rotate: 6 antenas giran 360 grados en RandomFloatRange(60, 120) s sin fin.
 //  - excavadoras (zombie_moon_digger.csc): consolas tunnel/hangar/biodome con panel_off a los 10 s y panel_on con TCA/HCA/BCA (TCO/HCO/BCO
 //    apagan); BIO cambia el modelo de la cupula a p_zom_moon_biodome_hole_broken y enciende sl9 / sl10.
-//  - Tierra (S_E/H_E/SDE/HDE): spawn del modelo p_zom_moon_earth(_dest) en (-22060.8, -121800, 34463.4); el harness no lo dibuja (tope de
-//    1200 u de los modelos de cliente).
+//  - Tierra (S_E/H_E/SDE/HDE): spawn del modelo p_zom_moon_earth(_dest) en (-22060.8, -121800, 34463.4), dibujado como modelo lejano
+//    (H19_ModelFar, sin el tope de 1200 u de los modelos de cliente); material mc/mtl_zom_moon_vista_earth (mc_unlit_blend, sin luz).
+//  - Wave Gun (OLA F1): microwavegun_bloat del clientflag 9 de actor = mapshaderconstant(0, "scriptVector3") con fraccion*4 durante
+//    2500 ms (1000 sin J_SpineLower): H19_ActorShaderPush/Pop, que H5V_DrawActors llama alrededor de cada actor.
 //  - ZEG (fin de partida): vuelve a poner la niebla de la luna o la de No Man's Land segun la ultima vision.
 //  - zombie_moon_amb.csc: las salas (vacio = instantanea zmb_moon_airless sin tono) las lleva h5_audio_cl. Aqui: con la corriente las zonas no
 //    rotas recuperan su tono (script_string del disparador) y quitan la instantanea (evt_air_repressurize); "Az<zona>" las vuelve a dejar sin
 //    aire (evt_air_release, evt_dig_wheel_breakthrough[_bio]); pitidos amb_random_beeps (24, cada 10-30 s); alarmas y temblores de zona con
 //    Dz<n> / Dz<n>e; gmsk / gmsk2 (casco); sonidos del teletransporte (tafx: clicks y warmup/cooldown; cafx los cancela; bmfx: rayo);
 //    snd_play_auto_fx (amb_lights en los focos); puertas de la bahia de carga.
-// No se hace (ver docs/evidencia/m10/LEEME.md): cielo (r_skyTransition: el harness no dibuja el cielo), filtros del casco (clientflags 8/9,
-// comunes), vibraciones y earthquake, FX de las excavadoras en sus etiquetas (modelos de servidor sin dibujar), gravedad del ragdoll, huevos.
+// Cielo, casco, temblores, FX de las excavadoras y huevos por GSC ya estan (E3b, F1: docs/evidencia/e3b y f1_moon/LEEME.md). No se hace:
+// gravedad del ragdoll; la vibracion solo se cuenta (el Mac no tiene rumble).
 //   H19_MOON=0 lo apaga. Pruebas: H19_MOON_NOTIFY="ms:ev,..." inyecta levelNotify de cliente en ese level.time (grafico y sonido).
 #ifdef H5G
 #include <universal/q_shared.h>
@@ -71,6 +73,17 @@
 #include <string>
 #include <vector>
 #include "h19_mapcl.h"
+#include <xanim/xanim.h>
+
+// OLA F1 (diagnostico): entradas libres del pool XAnimInfo (retail 4096; agotado -> XAnimAllocInfoWithParent aborta):
+// la lista libre es el anillo que cuelga de g_xAnimInfo[0] (XAnimInit)
+extern XAnimInfo g_xAnimInfo[];
+static int H19_XAnimInfoFree()
+{
+    int n = 0;
+    for (unsigned i = g_xAnimInfo[0].next; i && n < g_xAnimInfoCount; i = g_xAnimInfo[i].next) ++n;
+    return n;
+}
 
 bool H7_VisionSetNaked(const char *name, float seconds) __attribute__((weak));   // h7_gfx.cpp
 void H7C_ClientVolFog(const float *v, int transitionMs) __attribute__((weak));     // h7c_gfx.cpp: setVolFog del CSC
@@ -1080,8 +1093,8 @@ void DiagFrame(int now)
     fprintf(stderr, "[H19] Moon diag t=%d: jugador (%.0f %.0f %.0f) gravedad %d salud %d jadeo %d volumen de perros %d | IA:%s\n", now, pl->r.currentOrigin[0],
         pl->r.currentOrigin[1], pl->r.currentOrigin[2], pl->client->ps.gravity, pl->health, (pl->client->ps.eFlags2 >> 2) & 1, inDogs, s.empty() ? " ninguna" : s.c_str());
     fprintf(stderr, "[H19] Moon diag E3b: excavadoras marcha/cava/brazo %d/%d/%d, FX en huesos %d (%d sin hueso), temblores %d, vibraciones %d, casco %d, "
-        "almas %d, Wave Gun ojos/hinchados/estallidos %d/%d/%d, QED %d, risers %d (+%d grandes), gravedad baja %d\n", s_digMoving, s_digDigging, s_digArm, s_tagFx, s_tagMiss,
-        s_quakes, s_rumbles, s_maskOn, s_souls, s_mwHits, s_mwBloat, s_mwPops, s_qedSounds, s_risers, s_risersLg, s_lowg);
+        "almas %d, Wave Gun ojos/hinchados/estallidos %d/%d/%d, QED %d, risers %d (+%d grandes), gravedad baja %d, XAnimInfo libres %d\n", s_digMoving, s_digDigging, s_digArm, s_tagFx, s_tagMiss,
+        s_quakes, s_rumbles, s_maskOn, s_souls, s_mwHits, s_mwBloat, s_mwPops, s_qedSounds, s_risers, s_risersLg, s_lowg, H19_XAnimInfoFree());
 }
 TestQ s_testG;
 void Frame(int now)
