@@ -213,7 +213,7 @@ bool SysState(const char *sys, const std::string &st, int)
 void Frame(int now)
 {
     H19Cfx_Frame(s_cfx, now);
-    PortalFrame(now);
+    if (s_cfx.t0 >= 0) PortalFrame(now);   // antes de que corra el reloj de FX, FX_PlayOrientedEffect cae (sin FxSystem)
 }
 void ScreensFrame()
 {
