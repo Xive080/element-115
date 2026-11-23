@@ -62,8 +62,11 @@ DWORD GetLastError() { return g_lastErr; }
 BOOL CloseHandle(HANDLE h) { if (h && h != INVALID_HANDLE_VALUE) close((int)(intptr_t)h - 1000); return 1; }
 DWORD GetFileSize(HANDLE h, DWORD *) { struct stat st; fstat((int)(intptr_t)h - 1000, &st); return (DWORD)st.st_size; }
 void SleepEx(DWORD, BOOL) {}
+extern bool g_h0InDbLoad;
+void (*g_h0LoadPump)() = nullptr;   // OLA F3b: video de carga (h22_video.cpp) presentado entre lecturas de zona
 BOOL ReadFileEx(HANDLE h, void *buf, DWORD n, OVERLAPPED *ov, void (*)(DWORD, DWORD, OVERLAPPED *))
 {
+    if (g_h0LoadPump && g_h0InDbLoad) g_h0LoadPump();
     off_t off = ((off_t)ov->OffsetHigh << 32) | ov->Offset;
     ssize_t r = pread((int)(intptr_t)h - 1000, buf, n, off);
     if (r <= 0) { g_lastErr = 38; return 0; }      // ERROR_HANDLE_EOF

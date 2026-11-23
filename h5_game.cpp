@@ -346,7 +346,9 @@ int H5G_Run()
     fprintf(stderr, "[H5G] SV_Init hecho; SV_SpawnServer(%s)\n", map);
     { void H5F_InstallHooks(); H5F_InstallHooks(); }   // H5f (h5_play.cpp): claves canonicas de level.round_number / zombie_total al final de la carga
     H15_MemPhase("carga_servidor");
+    { void H18_LoadVideoRemote(bool); H18_LoadVideoRemote(true); }   // OLA F3b: sin render en el hilo principal: el video lo presenta su hilo (R_BeginRemoteScreenUpdate)
     SV_SpawnServer(0, (char *)map, 1, 0);
+    { void H18_LoadVideoRemote(bool); H18_LoadVideoRemote(false); }
     fprintf(stderr, "[H5G] SV_SpawnServer hecho\n");
     if (getenv("H5_PLAYER") || getenv("H5_PLAY"))   // H5_PLAY (H5d, h5_play.cpp) tambien necesita el jugador
     {
@@ -395,6 +397,7 @@ int H5G_Run()
 #endif
         fprintf(stderr, "[H5V] render de H4 %dx%d, captura cada %d frames de servidor\n", W, H, viewEvery);
     }
+    { void H18_EndLoadVideo(); H18_EndLoadVideo(); }   // OLA F3b: carga hecha; el video de carga sigue hasta su final o hasta saltarlo
     if (getenv("H5_PLAY")) { extern int H5P_Run(int, bool); const int rc = H5P_Run(frames, view); H5G_ReportBuiltins(); return rc; }   // H5d: jugador unificado + render cada frame
     for (g_h5gFrame = 0; g_h5gFrame < frames; ++g_h5gFrame)
     {

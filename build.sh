@@ -165,10 +165,14 @@ if [ -n "$H5G" ] && [ -n "$H6SND" ]; then   # OLA 6a: salida de audio (miniaudio
   LIBS="$MAO $LIBS"; if [ "$TARGET" = ndk ]; then LIBS="$LIBS -ldl -lm"; else LIBS="$LIBS -framework CoreAudio -framework AudioToolbox -framework CoreFoundation"; fi
 fi
 if [ -n "$VK_BE" ] && [ -n "$H5G" ]; then   # OLA F3: decodificador PORTABLE del video de carga (WebM VP9+Opus), compilado aparte sin el prelude
-  # libvpx + libopus estaticas: H22_DEPS=<dir con include/ y lib/> (Android: las del NDK de arm64); en el Mac, las de Homebrew si estan.
-  # Sin ellas se compila igual (sin H22_VPX) y el juego sigue sin video. H22_DEPS=none fuerza eso.
-  H22D=${H22_DEPS:-}; [ -z "$H22D" ] && [ "$TARGET" != ndk ] && command -v brew >/dev/null && H22D=$(brew --prefix 2>/dev/null)
-  H22FL=""; H22L=""; if [ -n "$H22D" ] && [ "$H22D" != none ] && [ -f "$H22D/lib/libvpx.a" ] && [ -f "$H22D/lib/libopus.a" ] && [ -f "$H22D/include/vpx/vpx_decoder.h" ]; then H22FL="-DH22_VPX -I$H22D/include"; H22L="$H22D/lib/libvpx.a $H22D/lib/libopus.a"; fi
+  # OLA F3b: libvpx (decodificador VP9) y libopus compiladas desde sus FUENTES de third_party/{libvpx,opus} con el compilador del destino
+  # (build_h22deps.sh, una vez por carpeta de salida). Sin las fuentes, o con H22_DEPS=none, se compila sin H22_VPX y el juego sigue sin video.
+  H22D=$O/h22deps; H22FL=""; H22L=""
+  if [ "${H22_DEPS:-}" != none ] && [ -f $H/../third_party/libvpx/configure ] && [ -f $H/../third_party/opus/include/opus.h ]; then
+    H22T=mac; [ "$TARGET" = ndk ] && H22T=ndk
+    $H/harness2/build_h22deps.sh $H22D $H22T ${CXX/clang++/clang} || { echo "FAIL h22deps (libvpx/libopus)"; exit 1; }
+    H22FL="-DH22_VPX -I$H22D/include"; H22L="$H22D/lib/libvpx.a $H22D/lib/libopus.a"
+  fi
   mkdir -p $O/h22obj; H22O=$O/h22obj/h22_codec.o
   if [ ! -f $H22O ] || [ $H/harness2/h22_codec.cpp -nt $H22O ] || [ $H/harness2/h22_codec.h -nt $H22O ] || [ "$(cat $O/h22obj/fl 2>/dev/null)" != "$H22FL" ]; then
     ${CXX} -std=c++17 -O2 -w ${APP:+-fPIC} $NPFX $H22FL -c $H/harness2/h22_codec.cpp -o $H22O || { echo "FAIL h22_codec"; exit 1; }; echo "$H22FL" > $O/h22obj/fl; echo "CC h22_codec ${H22FL:+(libvpx+libopus)}"; fi

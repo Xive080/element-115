@@ -131,15 +131,23 @@ void H18_ResolveBoot(int argc, char **argv)
 //   Mac: demuxer WebM propio (EBML, solo SimpleBlock) + VideoToolbox VP9 (VTRegisterSupplementalVideoDecoderIfAvailable) + AudioToolbox Opus.
 // Contrato: se llama una vez al entrar en el mapa, antes de cargar las zonas; bloquea hasta el final del video o un toque/tecla
 // (saltar) y devuelve false si no pudo (falta el fichero, codec no disponible, error): el juego sigue sin video y sin error.
+// OLA F3b: como el original (R_BeginRemoteScreenUpdate), el video suena DURANTE la carga si el reproductor da la variante asincrona:
+// g_h18BeginVideo arranca y vuelve; la carga llama a H18_LoadVideoRemote(true/false) en los tramos sin render y H18_EndLoadVideo al
+// acabar (sigue hasta el final del video o hasta saltarlo). Sin ella, g_h18PlayVideo bloqueante como antes.
 bool (*g_h18PlayVideo)(const char *path) = nullptr;
+bool (*g_h18BeginVideo)(const char *path) = nullptr;
+void (*g_h18VideoRemote)(bool on) = nullptr;
+void (*g_h18EndVideo)() = nullptr;
+void H18_LoadVideoRemote(bool on) { if (g_h18VideoRemote) g_h18VideoRemote(on); }
+void H18_EndLoadVideo() { if (g_h18EndVideo) g_h18EndVideo(); }
 void H18_PlayLoadVideo()
 {
     const H18Map *m = Find(H18_Map()); if (!m || !m->video || !*m->video || getenv("H18_NOVIDEO")) return;
     const std::string path = s_dir + "/" + m->video;
     if (!IsFile(path)) { fprintf(stderr, "[H18] video de carga: no hay %s (se sigue sin video)\n", path.c_str()); return; }
     if (!g_h18PlayVideo) { fprintf(stderr, "[H18] video de carga: %s presente; reproductor pendiente (stub OLA M0), se salta\n", path.c_str()); return; }
-    const bool ok = g_h18PlayVideo(path.c_str());
-    fprintf(stderr, "[H18] video de carga %s: %s\n", path.c_str(), ok ? "reproducido" : "fallo, se salta");
+    const bool ok = g_h18BeginVideo ? g_h18BeginVideo(path.c_str()) : g_h18PlayVideo(path.c_str());
+    fprintf(stderr, "[H18] video de carga %s: %s\n", path.c_str(), !ok ? "fallo, se salta" : g_h18BeginVideo ? "en marcha" : "reproducido");
 }
 
 // cambio de mapa (menu): se guarda la eleccion y se relanza (el motor no es reentrante, como "Restart level")

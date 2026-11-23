@@ -1,0 +1,9 @@
+Avisos de terceros del decodificador del video de carga (h22_codec.cpp, OLA F3b).
+
+- libvpx 1.16.0 (WebM Project): solo el decodificador VP9. Licencia BSD de 3 clausulas (libvpx_LICENSE.txt) y concesion
+  adicional de patentes de Google (libvpx_PATENTS.txt). Fuentes: native/third_party/libvpx (VERSION_BO1.txt dice el origen y el sha256).
+- Opus 1.6.1 (Xiph.Org y colaboradores): solo el decodificador en coma flotante. Licencia BSD de 3 clausulas (opus_COPYING.txt).
+  Fuentes: native/third_party/opus.
+
+Se compilan desde esas fuentes con el proyecto (build_h22deps.sh, lo llama build.sh) para el Mac y para Android; no se
+distribuyen binarios aparte. Los mismos textos van dentro del APK (nativeapp/res/raw/avisos_terceros.txt).
