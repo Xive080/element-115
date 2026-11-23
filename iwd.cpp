@@ -14,7 +14,7 @@
 
 struct IwdEntry { int fd; uint64_t off; uint32_t size; };
 static std::unordered_map<std::string, IwdEntry> g_iwdIndex;
-struct OpenFile { IwdEntry e; uint64_t pos; bool used; const char *mem = nullptr; };
+struct OpenFile { IwdEntry e; uint64_t pos; bool used; const char *mem = nullptr; FILE *wf = nullptr; };
 // H5: ficheros en memoria (GSC de prueba del harness); tienen prioridad sobre los .iwd
 static std::unordered_map<std::string, std::string> g_memFiles;
 void FS_H0_AddMemFile(const char *name, const char *data, size_t len) { std::string k = name; for (auto &c : k) { c = tolower((unsigned char)c); if (c == '\\') c = '/'; } g_memFiles[k] = std::string(data, len); }
@@ -70,7 +70,29 @@ unsigned int FS_Read(unsigned char *buffer, unsigned int len, int h)
     if (f.mem) { memcpy(buffer, f.mem + f.pos, n); f.pos += n; return n; }
     ssize_t r = pread(f.e.fd, buffer, n, f.e.off + f.pos); if (r < 0) return 0; f.pos += r; return (unsigned)r;
 }
-void FS_FCloseFile(int h) { if (h > 0 && h < (int)g_open.size()) g_open[h].used = false; }
+void FS_FCloseFile(int h) { if (h > 0 && h < (int)g_open.size()) { if (g_open[h].wf) { fclose(g_open[h].wf); g_open[h].wf = nullptr; } g_open[h].used = false; } }
+// OLA S (selftests): escritura de ficheros de texto (FS_FOpenTextFileWrite / FS_FOpenFileAppend / FS_Write de com_files.cpp). Antes eran
+// stubs que abortaban: DB_LogMissingAsset (db_registry.cpp) abre missingasset.csv cuando XAnimAllocInfoWithParent usa una animacion que
+// el fastfile del usuario no trae (parts por defecto); eso tiraba Kino y Moon con el piloto (se habia tomado por el pool XAnimInfo agotado).
+// El fichero va a la carpeta base de los datos (P3_GAMEDATA, como fs_homepath); si no se puede abrir se devuelve 0 y el original sigue
+// (com_missingAssetOpenFailed). Lo escrito tambien sale por stderr con [FS] para los logs de las pruebas.
+static int FS_H0_OpenWrite(const char *filename, const char *mode)
+{
+    const char *gd = getenv("P3_GAMEDATA"); std::string k = filename; for (auto &c : k) if (c == '\\') c = '/';
+    const std::string path = std::string(gd ? gd : "../../gamedata") + "/" + k;
+    FILE *f = fopen(path.c_str(), mode);
+    fprintf(stderr, "[FS] %s '%s'%s\n", *mode == 'a' ? "anadir a" : "escribir", k.c_str(), f ? "" : " (no se puede abrir)");
+    if (!f) return 0;
+    OpenFile o{IwdEntry{-1, 0, 0}, 0, true}; o.wf = f; g_open.push_back(o); return (int)g_open.size() - 1;
+}
+int FS_FOpenTextFileWrite(char *filename) { return FS_H0_OpenWrite(filename, "w"); }
+int FS_FOpenFileAppend(char *filename) { return FS_H0_OpenWrite(filename, "a"); }
+unsigned int FS_Write(char *buffer, unsigned int len, int h)
+{
+    if (h <= 0 || h >= (int)g_open.size() || !g_open[h].used || !g_open[h].wf) return 0;
+    fprintf(stderr, "[FS] escrito: %.*s%s", (int)std::min(len, 400u), buffer, len && buffer[len - 1] == '\n' ? "" : "\n");
+    return (unsigned)fwrite(buffer, 1, len, g_open[h].wf);
+}
 // H6a (h5_audio.cpp): localiza un fichero de los .iwd (fd, desplazamiento y tamano) para leerlo con pread desde el hilo de carga
 // de streams. Se llama en el hilo principal; el indice ya no cambia despues de IwdInit.
 bool FS_H6A_Locate(const char *filename, int *fd, unsigned long long *off, unsigned int *size)
