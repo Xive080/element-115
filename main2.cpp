@@ -98,6 +98,7 @@ static void LoadFF(const char *path)
     printf("%s: %d assets\n", zn.c_str(), g_varXAssetList.assetCount);
     CloseHandle(h);
 }
+void H0_LoadZoneFile(const char *path) { LoadFF(path); }   // OLA U2: h21_menu.cpp (en_patch.ff con las descripciones de los mapas)
 
 // ---- nombres de objetos D3D para la traza: se resuelven recorriendo los assets (imagen->texture.basemap, shader->prog)
 static std::map<const void *, std::string> g_names[4];
