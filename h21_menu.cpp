@@ -656,4 +656,10 @@ void H21_Key(int key) { Key(key); }
 void H21_Char(int c) { TypeChar(c); }   // Android: teclado en pantalla para el nombre
 bool H21_Back() { return Back(); }      // OLA U2: Atras del sistema; false = salir de la app
 bool H21_EditingName() { return s_editName; }   // OLA U2: la app muestra/oculta el teclado en pantalla
+// OLA U2b: el teclado del sistema escribe en un campo de texto de Android; la app le da el nombre al empezar (H21_Name) y le devuelve el
+// contenido entero del campo cada vez que cambia (H21_SetName: mismos caracteres validos y tope de 16 que al teclear; vacio se queda vacio
+// hasta terminar, que vuelve a "Player" como con la tecla).
+const char *H21_Name() { return s_name.c_str(); }
+int H21_NameMax() { return 16; }
+void H21_SetName(const char *t) { if (!s_editName || !t) return; std::string n; for (; *t && n.size() < 16; ++t) if (NameChar((unsigned char)*t)) n += *t; s_name = n; s_nameFresh = false; }
 int (*g_h21Frontend)(int W, int H) = H21_Run;   // main2.cpp (puntero de datos: a cero si esta TU no esta)

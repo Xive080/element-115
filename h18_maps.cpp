@@ -140,7 +140,8 @@ bool (*g_h18BeginVideo)(const char *path) = nullptr;
 void (*g_h18VideoRemote)(bool on) = nullptr;
 void (*g_h18EndVideo)() = nullptr;
 void H18_LoadVideoRemote(bool on) { if (g_h18VideoRemote) g_h18VideoRemote(on); }
-void H18_EndLoadVideo() { if (g_h18EndVideo) g_h18EndVideo(); }
+void H6_SavePipelines(const char *why) __attribute__((weak));   // h6_loading.cpp (solo con backend Vulkan)
+void H18_EndLoadVideo() { if (g_h18EndVideo) g_h18EndVideo(); if (&H6_SavePipelines) H6_SavePipelines("mapa cargado"); }   // OLA U2b: pipelines de la carga a la cache ya
 void H18_PlayLoadVideo()
 {
     const H18Map *m = Find(H18_Map()); if (!m || !m->video || !*m->video || getenv("H18_NOVIDEO")) return;

@@ -2,6 +2,12 @@
 // Recorre pipelines.keys (claves con pk= de v9_shaders.spvc) y crea cada VkPipeline con progreso REAL en pantalla. En el primer arranque
 // (sin VkPipelineCache valida) el driver compila todo aqui; en los siguientes las creaciones salen de la cache y la pantalla ni se ve.
 // Dibujo sin shaders: rectangulos con g9::Clear (vkCmdClearAttachments) y una fuente de 5x7 en bits. H6_NOPREWARM=1 lo desactiva.
+// OLA U2b: con el menu principal (H21_MENU=1) NO se precompila: el menu dibuja pocos pipelines y los crea al vuelo; la barra ya no sale
+// al abrir la app. Al entrar en el mapa main2 arranca primero el video de carga (h22) y el precompilado corre DEBAJO de el, sin barra:
+// entre pipeline y pipeline se bombea el video (g_h0LoadPump, como las lecturas de zona). La barra solo queda si no hay video (falta el
+// .webm, sin ventana, H18_NOVIDEO). Tras precompilar (y al acabar la carga, al pausar, relanzar o salir de la app) se guarda la cache si
+// hay pipelines nuevos (H6_SavePipelines): la app sale con _exit al relanzar y PipelineShutdown no llegaba a escribirla (medido en el Fold: cache del
+// 17-11, 432 pipelines en 4,8 s "con cache caliente" en cada arranque).
 #include "../vk/g9_api.h"
 #include <chrono>
 #include <stdlib.h>
@@ -9,6 +15,7 @@
 #include <string.h>
 
 namespace g9 { int PrewarmCount(); bool PrewarmCold(); int PrewarmStep(int i); }
+namespace v9 { bool PipelineSave(); }   // vk_state_ext.h (no se incluye: arrastra volk); escribe VkPipelineCache + pipelines.keys
 
 namespace {
 // 5x7: cada glifo son 7 filas de 5 bits (bit 4 = columna izquierda)
@@ -42,8 +49,26 @@ void Draw(int W, int H, int done, int total) {
 }
 }  // namespace
 
+extern void (*g_h0LoadPump)();   // rt2.cpp: video de carga en marcha (h22_video.cpp); nullptr si no hay
+bool H22_VideoActive() __attribute__((weak));
+
+// Guarda VkPipelineCache + pipelines.keys si hay pipelines nuevos desde el ultimo guardado (g9::Stats::n_pipeline, los vivos del backend).
+// No hace nada si no hay ninguno nuevo. Solo desde el hilo del render (main2 / la app entre frames), nunca con el presentador de h22 activo.
+void H6_SavePipelines(const char *why) {
+    static uint32_t saved = 0;
+    if (!g9::Active()) return;
+    const uint32_t n = g9::GetStats().n_pipeline;
+    if (n <= saved) return;
+    auto t0 = std::chrono::steady_clock::now(); const bool ok = v9::PipelineSave();
+    fprintf(stderr, "[H6] cache de pipelines guardada (%s): %u pipelines nuevos, %s en %.0f ms\n", why ? why : "-", n - saved, ok ? "ok" : "FALLO",
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    if (ok) saved = n;
+}
+
 void H6_PrewarmPipelines(int W, int H) {
     if (getenv("H6_NOPREWARM")) return;
+    if (getenv("H21_MENU") && atoi(getenv("H21_MENU")) && !getenv("H6_SHOW")) { fprintf(stderr, "[H6] prewarm: menu principal, sin precompilar (se hace bajo el video de carga del mapa)\n"); return; }
+    const bool video = &H22_VideoActive && H22_VideoActive() && g_h0LoadPump;   // el video tapa la carga: sin barra encima
     int total = g9::PrewarmCount(); if (total <= 0) { fprintf(stderr, "[H6] prewarm: sin pipelines.keys (se compilaran al vuelo)\n"); return; }
     bool cold = g9::PrewarmCold(); bool force = getenv("H6_SHOW") != nullptr; const char *shot = getenv("H6_SHOT");   // H6_SHOW: pantalla siempre; H6_SHOT=png: captura a mitad
     auto t0 = std::chrono::steady_clock::now(), last = t0; bool shown = false; int ok = 0, skip = 0, fail = 0;
@@ -51,6 +76,7 @@ void H6_PrewarmPipelines(int W, int H) {
         int r = g9::PrewarmStep(i); if (r > 0) ok++; else if (r == 0) skip++; else fail++;
         auto now = std::chrono::steady_clock::now();
         // la pantalla solo aparece si el precompilado tarda (primer arranque o driver nuevo); con cache caliente no hay parpadeo
+        if (video) { g_h0LoadPump(); continue; }   // presenta la imagen del video que toque (no hace nada si no han pasado 4 ms)
         if (std::chrono::duration<double, std::milli>(now - (shown ? last : t0)).count() > (shown ? 33.0 : force ? 0.0 : 150.0)) {
             Draw(W, H, i + 1, total); shown = true; last = now;
             if (shot && i >= total / 2) { int w, h; g9::ReadbackPNG(shot, &w, &h); shot = nullptr; }
@@ -58,6 +84,8 @@ void H6_PrewarmPipelines(int W, int H) {
     }
     if (shown) Draw(W, H, total, total);
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    fprintf(stderr, "[H6] prewarm: %d/%d pipelines en %.0f ms (sin pk/programa=%d fallos=%d, cache %s, pantalla %s)\n", ok, total, ms, skip, fail, cold ? "fria" : "caliente", shown ? "si" : "no");
-    g9::Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0xFF000000, 1.f, 0);
+    fprintf(stderr, "[H6] prewarm: %d/%d pipelines en %.0f ms (sin pk/programa=%d fallos=%d, cache %s, pantalla %s)\n", ok, total, ms, skip, fail, cold ? "fria" : "caliente",
+            video ? "no (bajo el video de carga)" : shown ? "si" : "no");
+    if (!video) g9::Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0xFF000000, 1.f, 0);
+    H6_SavePipelines("tras precompilar");
 }

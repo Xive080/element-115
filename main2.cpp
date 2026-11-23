@@ -178,10 +178,11 @@ int main(int argc, char **argv)
             // El contenido inicial del backbuffer es indefinido en Vulkan (en GLES salia negro por defecto): se limpia una vez para que las capturas sean deterministas.
             g9::Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0xFF000000, 1.0f, 0);
             atexit([] { if (g9::Active()) { TraceDevice_ReleaseAll(); g9::Shutdown(); } });   // exit(1) de LoadFF etc. (los return los cubre g9guard)
-            { extern void H6_PrewarmPipelines(int, int); H6_PrewarmPipelines(W0, H0); }   // OLA 6b: "Loading shaders" (h6_loading.cpp)
 #ifdef H5G
             { extern int g_h22W, g_h22H; g_h22W = W0; g_h22H = H0; H18_PlayLoadVideo(); }   // OLA F3: video de carga con el backend ya creado (h22_video.cpp)
 #endif
+            // OLA 6b: "Loading shaders" (h6_loading.cpp). OLA U2b: despues del video (lo bombea y no pinta barra encima); con el menu no precompila
+            { extern void H6_PrewarmPipelines(int, int); H6_PrewarmPipelines(W0, H0); }
         }
 #else
         if (useGL && !g9::Init(W0, H0, nativeWindow)) { fprintf(stderr, "[P4] g9::Init fallo\n"); return 1; }
