@@ -7,9 +7,10 @@ It is an independent project and is not affiliated with or endorsed by the origi
 
 ## What this repository is
 The *harness*: client-side layer (HUD, touch controls, menus, audio, loading video, per-map client scripts) that sits on top of the game-logic port in the companion repository `element-115-zdec`.
-It is **not buildable on its own**: it expects the rest of the backend (D3D9-to-Vulkan layer, shaders, compatibility headers) that lives outside this repository and has not been published yet.
+It is **not buildable on its own**: it expects the backend (D3D9-to-Vulkan layer, shaders, compatibility headers) from `element-115-backend` and must be cloned into `native/h0/harness2` as described there. macOS instructions are in that repository's `docs/JUGAR_MAC.md`.
 
 ## Related repositories
+- `element-115-backend`: backend, build glue, docs and the full layout.
 - `element-115-android`: Android app and packaging scripts.
 - `element-115-zdec`: game-logic port (fork of an existing public decompilation project; see its `PROCEDENCIA.md`).
 
