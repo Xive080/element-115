@@ -13,6 +13,11 @@
 // los topes). HELL MODE: es un mod de vel.gg (mods/horde, no esta en los datos del juego): visible y marcado NOT AVAILABLE.
 // Variables: H21_MENU=1 abre el menu; H21_PILOT="t accion;..." (pruebas: move/down/up/tap x y en fraccion, key n, type texto, shot tag,
 // quit); H21_NOLAUNCH=1 no relanza (pruebas); H21_TRACE=1; H21_LOC=texto vuelca entradas de localizacion que lo contienen.
+// OLA U2 (APK): la app Android arranca aqui (g_h21PollEvents bombea sus eventos en cada frame; H21_Touch/H21_Key/H21_Char/H21_Back),
+// MISSION SELECT en dos columnas si la lista de una no cabe con filas tactiles (Fold plegado), boton START grande, textos que encogen
+// para caber, descripciones MENU_ZOMBIE_*_DESC de las zonas (las 7 que faltan en las comunes viven en el en_patch.ff nuevo que traen
+// las carpetas de los mapas: se carga en el menu) y, en la app, players/bo1_launch.txt para que el reinicio entre directo al mapa.
+// MULTIPLAYER (co-op local) queda como hueco en la app: visible y NOT AVAILABLE (H21_COOP=1 lo abre para pruebas).
 #include <database/db_registry.h>
 #include <database/db_assetnames.h>
 #include <universal/ptr32.h>
@@ -30,6 +35,7 @@
 #include <string.h>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include <math.h>
 #include <time.h>
 #include <unistd.h>
@@ -46,13 +52,26 @@ void Z_VirtualFree(void *ptr, int type);
 void H4_Shot(const char *tag);                            // world_h4.cpp (P4_OUT con sufijo)
 const char *H18_BaseDir();                                // h18_maps.cpp
 bool H18_MapPlayable(const char *zone);
+const char *H18_MapDirFor(const char *zone);              // OLA U2: carpeta de datos jugable del mapa ("" si no hay)
+void H0_LoadZoneFile(const char *path);                   // OLA U2: main2.cpp (LoadFF)
 int H10_CfgQuality();                                     // h10_settings.cpp
 void H10_CfgSetQuality(int q);
 extern bool (*g_h10GetSafeInsets)(int W, int H, float out[4]);
 extern float g_h10Dpi;
 extern void (*g_h10RestartApp)();
 
+void (*g_h21PollEvents)() = nullptr;   // OLA U2: la app Android (eventos del looper en cada frame del menu)
+bool g_h21Running = false;             // OLA U2: el menu esta en pantalla (la app le manda los toques y teclas)
 namespace {
+bool CoopAvailable()
+{
+    if (const char *e = getenv("H21_COOP")) return atoi(e) != 0;
+#ifdef BO1_APP
+    return false;   // OLA U2: co-op local fuera de esta version del APK (sin permiso INTERNET ni vista de cliente): hueco visible
+#else
+    return true;
+#endif
+}
 bool Trace() { static const bool t = getenv("H21_TRACE") && atoi(getenv("H21_TRACE")); return t; }
 double NowMs() { timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec * 1e-6; }
 
@@ -124,9 +143,41 @@ std::string LocFind(const char *token)
     return q.best;
 }
 
+// OLA U2: las descripciones de Der Riese, Nacht, Verrueckt, Shi No Numa, Call of the Dead, Shangri-La y Moon no estan en las zonas
+// comunes de la base (en_code_post_gfx_mp solo trae THEATER, PENTAGON y COSMODROME): vienen en el en_patch.ff (solo localizacion). El de
+// la base (8,5 KB) trae COAST, TEMPLE y MOON; el de las actualizaciones que traen las carpetas de los mapas (25 KB) ademas las cuatro de
+// World at War con el prefijo WAW_. Se cargan en el menu (el
+// proceso se relanza al elegir mapa, asi que no queda nada en la partida) hasta tener todas o agotar las carpetas.
+long FileSize(const std::string &p) { struct stat st; return stat(p.c_str(), &st) == 0 ? (long)st.st_size : -1; }
+void LoadDescriptions()
+{
+    auto missing = [] { int n = 0; for (int i = 0; i < kNumMaps; ++i) n += s_desc[i].empty(); return n; };
+    // claves del juego: MENU_ZOMBIE_<CLAVE>_DESC (BO1) y WAW_MENU_ZOMBIE_<CLAVE>_DESC (los cuatro mapas de World at War)
+    auto lookup = [] { for (int i = 0; i < kNumMaps; ++i) for (const char *pre : { "", "WAW_" }) if (s_desc[i].empty()) { char k[64]; snprintf(k, sizeof k, "%sMENU_ZOMBIE_%s_DESC", pre, kMaps[i].token); s_desc[i] = LocFind(k); } };
+    lookup();
+    if (!missing()) return;
+    std::vector<std::string> dirs;
+    auto add = [&](const char *d) { if (d && *d) { const std::string s = d; for (const std::string &o : dirs) if (o == s) return; dirs.push_back(s); } };
+    add(getenv("P3_GAMEDATA")); add(H18_BaseDir());
+    for (int i = 0; i < kNumMaps; ++i) add(H18_MapDirFor(kMaps[i].zone));
+    // un fichero por version (tamano distinto), el mas grande primero: el en_patch de las actualizaciones lleva las 7 descripciones y una
+    // version vieja cargada antes reserva los mismos nombres (las entradas repetidas de la segunda zona no se enlazan)
+    std::vector<std::pair<long, std::string>> files;
+    for (const std::string &d : dirs) { const std::string f = d + "/zone/english/en_patch.ff"; const long sz = FileSize(f); if (sz <= 0) continue;
+        bool seen = false; for (auto &o : files) seen |= o.first == sz; if (!seen) files.push_back({ sz, f }); }
+    std::sort(files.begin(), files.end(), [](const std::pair<long, std::string> &x, const std::pair<long, std::string> &y) { return x.first > y.first; });
+    int loads = 0;
+    for (const auto &fz : files) {
+        if (!missing() || loads >= 3) break;
+        const int before = missing();
+        H0_LoadZoneFile(fz.second.c_str()); ++loads; lookup();
+        fprintf(stderr, "[H21] descripciones: %s (%ld bytes) -> %d de %d encontradas\n", fz.second.c_str(), fz.first, before - missing(), before);
+    }
+}
+
 // ---------------------------------------------------------------- estado del menu
 enum Screen { SETUP, MISSION };
-enum Item { IT_NONE = -1, IT_NAME = 0, IT_SOLO, IT_COOP, IT_HIGH, IT_LOW, IT_CHOOSE, IT_MAP0 = 100, IT_HELL = 200, IT_BACK };
+enum Item { IT_NONE = -1, IT_NAME = 0, IT_SOLO, IT_COOP, IT_HIGH, IT_LOW, IT_CHOOSE, IT_MAP0 = 100, IT_HELL = 200, IT_BACK, IT_START };
 Screen s_scr = SETUP;
 std::string s_name = "Player";
 bool s_coop = false; int s_quality = 2, s_quality0 = 2; int s_map = 0;
@@ -146,7 +197,7 @@ void LoadPrefs()
     while (fgets(line, sizeof line, f)) {
         char *nl = strpbrk(line, "\r\n"); if (nl) *nl = 0;
         if (!strncmp(line, "name=", 5)) { std::string n; for (const char *c = line + 5; *c && n.size() < 16; ++c) if (NameChar((unsigned char)*c)) n += *c; if (!n.empty()) s_name = n; }
-        else if (!strncmp(line, "mode=", 5)) s_coop = !strcmp(line + 5, "coop");
+        else if (!strncmp(line, "mode=", 5)) s_coop = !strcmp(line + 5, "coop") && CoopAvailable();
         else if (!strncmp(line, "map=", 4)) { for (int i = 0; i < kNumMaps; ++i) if (!strcmp(kMaps[i].zone, line + 4)) s_map = i; }
     }
     fclose(f);
@@ -168,6 +219,8 @@ float TextW(Font_s *f, const char *s, float px) { return f ? R_TextWidth(s, 0x7f
 // texto con la linea base en y; px = alto de la fuente en pixeles
 void Text(Font_s *f, const char *s, float x, float y, float px, const float *c) { if (f && s && *s) R_AddCmdDrawText((char *)s, 0x7fffffff, f, x, y, px / f->pixelHeight, px / f->pixelHeight, 0, c, 0); }
 void TextC(Font_s *f, const char *s, float cx, float y, float px, const float *c) { Text(f, s, cx - TextW(f, s, px) * 0.5f, y, px, c); }
+// OLA U2: alto de letra que cabe en maxW (en pantallas estrechas o columnas del Fold plegado los nombres largos encogen, no se salen)
+float FitPx(Font_s *f, const char *s, float px, float maxW) { const float w = TextW(f, s, px); return w > maxW && w > 0 ? px * maxW / w : px; }
 std::vector<std::string> Wrap(Font_s *f, const std::string &s, float px, float maxW)
 {
     std::vector<std::string> out; std::string line, word;
@@ -197,7 +250,10 @@ void OptionRow(int id, const char *label, float x, float y, float w, float h, bo
     const bool focus = s_focus == id; const float u = U();
     if (selected) Rect(x, y + 1, w, h - 2, kWhite); else Rect(x, y + 1, w, h - 2, kBar);
     if (focus) { Frame(x - 2, y - 1, w + 4, h + 2, 2, kWhite); if (selected) Frame(x + 1, y + 2, w - 2, h - 4, 2, kBlack); }
-    const float px = fminf(h * 0.70f, 31 * u);
+    float px = fminf(h * 0.70f, 31 * u);
+    if (!enabled) { const char *na = "NOT AVAILABLE"; const float np = fminf(h * 0.40f, 15 * u); Text(s_fSmall, na, x + w - TextW(s_fSmall, na, np) - 10 * u, y + h * 0.5f + np * 0.36f, np, kGrey);
+        px = FitPx(s_fNormal, label, px, w - 38 * u - TextW(s_fSmall, na, np) - 24 * u); }
+    else px = FitPx(s_fNormal, label, px, w - 46 * u);
     Text(s_fNormal, label, x + 38 * u, y + h * 0.5f + px * 0.36f, px, selected ? kBlack : enabled ? kWhite : kGrey);
     AddHit(id, x, y, w, h);
 }
@@ -224,7 +280,7 @@ void DrawSetup()
     Text(s_fSmall, "Up to 16 letters, numbers, spaces or . _ ' ! -", colX + 4 * u, y + 24 * u, 16 * u, kHint); y += 34 * u;
     Text(s_fSmall, "MODE", colX + 4 * u, y + 20 * u, 18 * u, kLabel); y += 30 * u;
     OptionRow(IT_SOLO, "SINGLE PLAYER", colX, y, colW, rowH, !s_coop); y += rowH;
-    OptionRow(IT_COOP, "MULTIPLAYER", colX, y, colW, rowH, s_coop); y += rowH + gap;
+    OptionRow(IT_COOP, "MULTIPLAYER", colX, y, colW, rowH, s_coop, CoopAvailable()); y += rowH + gap;
     Text(s_fSmall, "GRAPHICS", colX + 4 * u, y + 24 * u, 18 * u, kLabel); y += 30 * u;
     OptionRow(IT_HIGH, "HIGH", colX, y, colW, rowH, s_quality == 2); y += rowH;
     OptionRow(IT_LOW, "LOW", colX, y, colW, rowH, s_quality == 0); y += rowH + 18 * u;
@@ -240,7 +296,8 @@ void DrawSetup()
     switch (s_focus) {
     case IT_NAME: title = "YOUR NAME"; body = s_editName ? "Type your name. Enter or click outside to finish." : "Shown to the other players in local co-op."; break;
     case IT_SOLO: title = "SINGLE PLAYER"; body = "Play alone"; break;
-    case IT_COOP: title = "MULTIPLAYER"; body = "Local co-op on your own network: you host the game and others join it. Joining a game from this menu is not available yet (it opens with the client view)."; break;
+    case IT_COOP: title = "MULTIPLAYER"; body = CoopAvailable() ? "Local co-op on your own network: you host the game and others join it. Joining a game from this menu is not available yet (it opens with the client view)."
+                                                                 : "Local co-op is not available in this version yet. Play alone for now."; break;
     case IT_HIGH: title = "HIGH"; body = "Full resolution, shadows and post effects (the platform's High profile)."; break;
     case IT_LOW: title = "LOW"; body = "Lower resolution and texture detail, no shadows or post effects. Uses less memory and battery."; break;
     case IT_CHOOSE: title = "CHOOSE MAP"; body = s_coop ? "Pick the mission to host for local co-op." : "Pick a mission."; break;
@@ -258,34 +315,43 @@ void DrawSetup()
 void DrawMission()
 {
     const float u = U(), L = s_safe[0], T = s_safe[1], SW = s_W - s_safe[0] - s_safe[2], SH = s_H - s_safe[1] - s_safe[3];
-    const float rowH = fminf(fmaxf(40 * u, RowMin()), (SH - 160 * u) / 12.6f);   // 10 mapas + HELL + BACK caben siempre en la zona segura
-    // panel: titulo + 10 filas + HELL MODE; debajo BACK
-    const float listTop = 98 * u, ph = listTop + kNumMaps * rowH + 14 * u + rowH + 20 * u;
+    // una columna (como el original) si las 10 filas + HELL + BACK caben con el alto tactil minimo; si no (pantalla baja: Fold plegado en
+    // horizontal, mitad de la interior) dos columnas de 5, mismas filas y mismo orden (OLA U2)
+    const float rmin = RowMin();
+    float rowH = fminf(fmaxf(40 * u, rmin), (SH - 160 * u) / 12.6f);
+    const bool twoCol = rowH < rmin * 0.92f || getenv("H21_TWOCOL");
+    const int rowsPerCol = twoCol ? (kNumMaps + 1) / 2 : kNumMaps;
+    if (twoCol) rowH = fminf(fmaxf(40 * u, rmin), (SH - 160 * u) / (rowsPerCol + 2.6f));
+    // panel: titulo + filas + HELL MODE; debajo BACK / START
+    const float listTop = 98 * u, ph = listTop + rowsPerCol * rowH + 14 * u + rowH + 20 * u;
     const float bottom = rowH + 14 * u;
-    const float pw = fminf(SW - 24 * u, fmaxf(ph * 1.55f, 880 * u));
+    const float pw = twoCol ? SW - 24 * u : fminf(SW - 24 * u, fmaxf(ph * 1.55f, 880 * u));
     const float px0 = L + (SW - pw) * 0.5f, py0 = T + fmaxf(8 * u, (SH - ph - bottom) * 0.5f);
     const float shade[4] = { 1, 1, 1, 1 };
     if (s_frame) R_AddCmdDrawStretchPic(px0 - 18 * u, py0 - 12 * u, pw + 36 * u, ph + 24 * u, 0, 0, 1, 1, shade, s_frame);
     else { const float c[4] = { 0.30f, 0.05f, 0.05f, 0.85f }; Rect(px0, py0, pw, ph, c); }
     Text(s_fBig, "MISSION SELECT", px0 + 28 * u, py0 + 66 * u, 26 * u, kWhite);
     // lista
-    const float lx = px0 + 26 * u, lw = fminf(270 * u, pw * 0.36f);
-    float y = py0 + listTop;
+    const float lx = px0 + 26 * u, colGap = 12 * u;
+    const float lw = twoCol ? fminf(2 * 300 * u + colGap, pw * 0.56f) : fminf(270 * u, pw * 0.36f);   // ancho total de la lista
+    const float cw = twoCol ? (lw - colGap) * 0.5f : lw;                                             // ancho de una columna
     for (int i = 0; i < kNumMaps; ++i) {
         const int id = IT_MAP0 + i; const bool sel = s_map == i, focus = s_focus == id;
-        if (sel) Rect(lx, y + 1, lw, rowH - 2, kWhite); else Rect(lx + 18 * u, y + 1, lw - 18 * u, rowH - 2, kBar);
-        if (focus && !sel) Frame(lx + 16 * u, y, lw - 16 * u, rowH, 2, kWhite);
-        const float tp = fminf(rowH * 0.62f, 25 * u);
-        Text(s_fNormal, kMaps[i].label, lx + 26 * u, y + rowH * 0.5f + tp * 0.36f, tp, sel ? kBlack : s_mapOk[i] ? kWhite : kGrey);
-        AddHit(id, lx, y, lw, rowH); y += rowH;
+        const float x = lx + (twoCol ? (i / rowsPerCol) * (cw + colGap) : 0), y = py0 + listTop + (i % rowsPerCol) * rowH;
+        if (sel) Rect(x, y + 1, cw, rowH - 2, kWhite); else Rect(x + 18 * u, y + 1, cw - 18 * u, rowH - 2, kBar);
+        if (focus && !sel) Frame(x + 16 * u, y, cw - 16 * u, rowH, 2, kWhite);
+        const float tp = FitPx(s_fNormal, kMaps[i].label, fminf(rowH * 0.62f, 25 * u), cw - 34 * u);
+        Text(s_fNormal, kMaps[i].label, x + 26 * u, y + rowH * 0.5f + tp * 0.36f, tp, sel ? kBlack : s_mapOk[i] ? kWhite : kGrey);
+        AddHit(id, x, y, cw, rowH);
     }
-    y += 14 * u;
+    float y = py0 + listTop + rowsPerCol * rowH + 14 * u;
     {   // HELL MODE: mod de vel.gg, no esta en los datos del juego
-        const bool focus = s_focus == IT_HELL; Rect(lx + 18 * u, y + 1, lw - 18 * u, rowH - 2, kBar); if (focus) Frame(lx + 16 * u, y, lw - 16 * u, rowH, 2, kWhite);
-        const float tp = fminf(rowH * 0.62f, 25 * u);
+        const bool focus = s_focus == IT_HELL; Rect(lx + 18 * u, y + 1, cw - 18 * u, rowH - 2, kBar); if (focus) Frame(lx + 16 * u, y, cw - 16 * u, rowH, 2, kWhite);
+        const char *na = "NOT AVAILABLE"; const float np = fminf(rowH * 0.40f, 13 * u);
+        const float tp = FitPx(s_fNormal, "HELL MODE: OFF", fminf(rowH * 0.62f, 25 * u), cw - 50 * u - TextW(s_fSmall, na, np));
         Text(s_fNormal, "HELL MODE: OFF", lx + 26 * u, y + rowH * 0.5f + tp * 0.36f, tp, kGrey);
-        const char *na = "NOT AVAILABLE"; Text(s_fSmall, na, lx + lw - TextW(s_fSmall, na, 13 * u) - 8 * u, y + rowH * 0.5f + 5 * u, 13 * u, kGrey);
-        AddHit(IT_HELL, lx, y, lw, rowH);
+        Text(s_fSmall, na, lx + cw - TextW(s_fSmall, na, np) - 8 * u, y + rowH * 0.5f + np * 0.36f, np, kGrey);
+        AddHit(IT_HELL, lx, y, cw, rowH);
     }
     // derecha: nombre, imagen y descripcion del mapa elegido (o la explicacion de HELL MODE con foco)
     const float rx0 = lx + lw + 30 * u, rx1 = px0 + pw - 30 * u, cx = (rx0 + rx1) * 0.5f;
@@ -295,22 +361,31 @@ void DrawMission()
         for (const std::string &l : Wrap(s_fNormal, "Not available. Hell mode is a vel.gg mod (more zombies at once, a later starting round and no perk machines). It is not part of the game's own data, so this port cannot turn it on.", 19 * u, rx1 - rx0)) { TextC(s_fNormal, l.c_str(), cx, by, 19 * u, kHint); by += 22 * u; }
     } else {
         const MapEntry &m = kMaps[s_map];
-        TextC(s_fBig, m.label, cx, py0 + listTop + 20 * u, 24 * u, kWhite);
-        const float descH = 80 * u, imgTop = py0 + listTop + 34 * u, imgMax = py0 + ph - 24 * u - descH - imgTop;
-        const float side = fminf(rx1 - rx0, imgMax), ix = cx - side * 0.5f;
-        if (s_mapMat[s_map]) PicCover(s_mapMat[s_map], ix, imgTop, side, side, 1, 1, kWhite);
-        else { const float c[4] = { 0.08f, 0.08f, 0.08f, 0.92f }; Rect(ix, imgTop, side, side, c); Frame(ix, imgTop, side, side, 1, kGrey); TextC(s_fBig, m.label, cx, imgTop + side * 0.5f + 10 * u, 26 * u, kLabel); }
-        float by = imgTop + side + 24 * u;
+        TextC(s_fBig, m.label, cx, py0 + listTop + 20 * u, FitPx(s_fBig, m.label, 24 * u, rx1 - rx0), kWhite);
         std::string d = s_mapOk[s_map] ? s_desc[s_map] : std::string("The data for this map is not installed. Add it to the game folder (docs/NUEVO_MAPA.md) to play it.");
-        for (const std::string &l : Wrap(s_fNormal, d, 18 * u, rx1 - rx0)) { TextC(s_fNormal, l.c_str(), cx, by, 18 * u, kHint); by += 21 * u; }
+        const std::vector<std::string> lines = Wrap(s_fNormal, d, 18 * u, rx1 - rx0);
+        const float descH = fmaxf(80 * u, 24 * u + 21 * u * lines.size()), imgTop = py0 + listTop + 34 * u, imgMax = py0 + ph - 24 * u - descH - imgTop;
+        const float side = fmaxf(0, fminf(rx1 - rx0, imgMax)), ix = cx - side * 0.5f;
+        if (s_mapMat[s_map]) PicCover(s_mapMat[s_map], ix, imgTop, side, side, 1, 1, kWhite);
+        else { const float c[4] = { 0.08f, 0.08f, 0.08f, 0.92f }; Rect(ix, imgTop, side, side, c); Frame(ix, imgTop, side, side, 1, kGrey); TextC(s_fBig, m.label, cx, imgTop + side * 0.5f + 10 * u, FitPx(s_fBig, m.label, 26 * u, side * 0.9f), kLabel); }
+        AddHit(IT_MAP0 + s_map, ix, imgTop, side, side);   // OLA U2: la imagen tambien es una zona tactil del mapa elegido (toque = empezar)
+        float by = imgTop + side + 24 * u;
+        for (const std::string &l : lines) { TextC(s_fNormal, l.c_str(), cx, by, 18 * u, kHint); by += 21 * u; }
     }
-    {   // BACK y resumen de lo elegido
-        const float by = py0 + ph + 14 * u, bw = 110 * u; const bool focus = s_focus == IT_BACK;
+    {   // BACK, resumen de lo elegido y START (OLA U2: boton grande para el dedo; el doble toque y Enter siguen valiendo)
+        const float by = py0 + ph + 14 * u, bw = fmaxf(110 * u, rowH * 1.6f); bool focus = s_focus == IT_BACK;
         Rect(lx, by, bw, rowH, focus ? kWhite : kBar);
         const float tp = fminf(rowH * 0.66f, 27 * u); TextC(s_fNormal, "BACK", lx + bw * 0.5f, by + rowH * 0.5f + tp * 0.36f, tp, focus ? kBlack : kWhite);
         AddHit(IT_BACK, lx, by, bw, rowH);
+        const float sw = fmaxf(200 * u, rowH * 2.6f), sx = rx1 - sw; focus = s_focus == IT_START;
+        const bool ok = s_mapOk[s_map];
+        const float dis[4] = { 0.30f, 0.30f, 0.30f, 0.9f };
+        Rect(sx, by, sw, rowH, !ok ? dis : focus ? kRedHi : kRed); if (focus) Frame(sx - 2, by - 1, sw + 4, rowH + 2, 2, kWhite);
+        TextC(s_fNormal, "START", sx + sw * 0.5f, by + rowH * 0.5f + tp * 0.36f, tp, ok ? kWhite : kGrey);
+        AddHit(IT_START, sx, by, sw, rowH);
         char sum[96]; snprintf(sum, sizeof sum, "%s / %s GRAPHICS", s_coop ? "MULTIPLAYER (LOCAL CO-OP)" : "SINGLE PLAYER", s_quality == 0 ? "LOW" : s_quality == 2 ? "HIGH" : "CUSTOM");
-        Text(s_fSmall, sum, lx + bw + 16 * u, by + rowH * 0.5f + 6 * u, 17 * u, kWhite);
+        const float sp = FitPx(s_fSmall, sum, 17 * u, sx - (lx + bw + 16 * u) - 12 * u);
+        Text(s_fSmall, sum, lx + bw + 16 * u, by + rowH * 0.5f + sp * 0.36f, sp, kWhite);
     }
 }
 
@@ -339,12 +414,14 @@ void Activate(int id)
     switch (id) {
     case IT_NAME: if (!s_editName) s_nameFresh = true; s_editName = true; break;
     case IT_SOLO: s_coop = false; break;
-    case IT_COOP: s_coop = true; Notice("Local co-op: you host, others join. Joining from here opens with the client view."); break;
+    case IT_COOP: if (!CoopAvailable()) { Notice("Local co-op is not available in this version yet."); break; }
+        s_coop = true; Notice("Local co-op: you host, others join. Joining from here opens with the client view."); break;
     case IT_HIGH: SetQuality(2); break;
     case IT_LOW: SetQuality(0); break;
     case IT_CHOOSE: s_scr = MISSION; s_focus = IT_MAP0 + s_map; fprintf(stderr, "[H21] pantalla MISSION SELECT\n"); break;
     case IT_HELL: Notice("Hell mode is not available (vel.gg mod, not in the game data)."); break;
     case IT_BACK: s_scr = SETUP; s_focus = IT_CHOOSE; fprintf(stderr, "[H21] pantalla GAME SETUP\n"); break;
+    case IT_START: if (!s_mapOk[s_map]) { Notice("This map's data is not installed."); break; } s_launch = true; s_launchMap = s_map; break;
     default:
         if (id >= IT_MAP0 && id < IT_MAP0 + kNumMaps) {
             const int i = id - IT_MAP0; s_map = i;
@@ -364,7 +441,7 @@ const int kSetupOrder[] = { IT_NAME, IT_SOLO, IT_COOP, IT_HIGH, IT_LOW, IT_CHOOS
 void Move(int d)
 {
     std::vector<int> v;
-    if (s_scr == SETUP) v.assign(kSetupOrder, kSetupOrder + 6); else { for (int i = 0; i < kNumMaps; ++i) v.push_back(IT_MAP0 + i); v.push_back(IT_HELL); v.push_back(IT_BACK); }
+    if (s_scr == SETUP) v.assign(kSetupOrder, kSetupOrder + 6); else { for (int i = 0; i < kNumMaps; ++i) v.push_back(IT_MAP0 + i); v.push_back(IT_HELL); v.push_back(IT_BACK); v.push_back(IT_START); }
     int k = 0; for (size_t i = 0; i < v.size(); ++i) if (v[i] == s_focus) k = (int)i;
     k = (k + d + (int)v.size()) % (int)v.size(); Focus(v[k]);
 }
@@ -430,6 +507,15 @@ void MacEv(int kind, float fx, float fy, int key)
 }
 #endif
 
+// ---------------------------------------------------------------- Atras (Android / mando)
+// OLA U2: Atras del sistema o B: termina de editar el nombre, vuelve de MISSION SELECT; en GAME SETUP devuelve false (la app sale)
+bool Back()
+{
+    if (s_editName) { Key(K_ENTER); return true; }
+    if (s_scr == MISSION) { Activate(IT_BACK); return true; }
+    return false;
+}
+
 // ---------------------------------------------------------------- piloto (pruebas): "t accion;..." con t en segundos de frames/60
 struct PilotEv { double t; std::string a; };
 std::vector<PilotEv> s_pilot; size_t s_pilotI;
@@ -444,7 +530,7 @@ void PilotStep(int frame)
         H4_Shot((std::string("_h21_") + w).c_str());
     }
     while (s_pilotI < s_pilot.size() && s_pilot[s_pilotI].t <= t) {
-        const std::string &a = s_pilot[s_pilotI++].a; float x = 0, y = 0; int k = 0; char w[64] = "";
+        const std::string &a = s_pilot[s_pilotI++].a; float x = 0, y = 0, dx2 = 0, dy2 = 0; int k = 0, k2 = 0; char w[64] = "";
         fprintf(stderr, "[H21] piloto t=%.2f: %s\n", t, a.c_str());
         if (sscanf(a.c_str(), "move %f %f", &x, &y) == 2) PointerMove(x * s_W, y * s_H);
         else if (sscanf(a.c_str(), "down %f %f", &x, &y) == 2) PointerDown(x * s_W, y * s_H);
@@ -454,6 +540,14 @@ void PilotStep(int frame)
         else if (!strncmp(a.c_str(), "type ", 5)) { for (const char *c = a.c_str() + 5; *c; ++c) TypeChar((unsigned char)*c); }
         else if (sscanf(a.c_str(), "shot %63s", w) == 1) { std::string tag = std::string("_h21_") + w; H4_Shot(tag.c_str()); }
         else if (sscanf(a.c_str(), "tapid %d", &k) == 1) { for (const Hit &h : s_hits) if (h.id == k) { const float cx = h.x + h.w * 0.5f, cy = h.y + h.h * 0.5f; fprintf(stderr, "[H21] toque en %d (%.0f,%.0f) fila %.0f px\n", k, cx, cy, h.h); PointerDown(cx, cy); PointerUp(cx, cy); break; } }   // toque (dedo) en el centro de una zona
+        else if (a == "back") { const bool r = Back(); fprintf(stderr, "[H21] atras -> %s\n", r ? "consumido" : "salir de la app"); }
+        else if (sscanf(a.c_str(), "drag %f %f %f %f", &x, &y, &dx2, &dy2) == 4) {   // arrastre del dedo en 8 pasos (abajo, mover, arriba)
+            PointerDown(x * s_W, y * s_H); for (int k = 1; k <= 8; ++k) PointerMove((x + (dx2 - x) * k / 8) * s_W, (y + (dy2 - y) * k / 8) * s_H); PointerUp(dx2 * s_W, dy2 * s_H); }
+        else if (sscanf(a.c_str(), "dragid %d %d", &k, &k2) == 2) {   // arrastre del dedo del centro de una zona al de otra (ids de Item)
+            const Hit *ha = nullptr, *hb = nullptr; for (const Hit &h : s_hits) { if (h.id == k && !ha) ha = &h; if (h.id == k2 && !hb) hb = &h; }
+            if (ha && hb) { const Hit A = *ha, B = *hb; const float ax = A.x + A.w * 0.5f, ay = A.y + A.h * 0.5f, bx = B.x + B.w * 0.5f, by = B.y + B.h * 0.5f;
+                fprintf(stderr, "[H21] arrastre %d (%.0f,%.0f) -> %d (%.0f,%.0f)\n", k, ax, ay, k2, bx, by);
+                PointerDown(ax, ay); for (int j = 1; j <= 8; ++j) { PointerMove(ax + (bx - ax) * j / 8, ay + (by - ay) * j / 8); fprintf(stderr, "[H21]   paso %d foco %d\n", j, s_focus); } PointerUp(bx, by); } }
         else if (a == "quit") s_quit = true;
     }
 }
@@ -475,7 +569,12 @@ void Launch(int i)
     const char *b = H18_BaseDir(); if (b && *b) setenv("P3_GAMEDATA", b, 1);
     unsetenv("H10_CFG"); unsetenv("V9_TEXPKG");
     if (const char *nx = getenv("H21_PILOT_NEXT")) { setenv("H10_PILOT", nx, 1); unsetenv("H21_PILOT_NEXT"); }
-    if (g_h10RestartApp) { g_h10RestartApp(); return; }   // Android: la app se reinicia y lee bo1_map.txt / bo1_net.txt
+    if (g_h10RestartApp) {   // Android: la app se reinicia y lee bo1_map.txt / bo1_net.txt
+        // OLA U2: un solo uso; la app lo borra al arrancar y entra directa al mapa (sin el, arranca en este menu)
+        if (FILE *f = fopen((pd + "/bo1_launch.txt").c_str(), "w")) { fprintf(f, "%s\n", m.zone); fclose(f); }
+        else fprintf(stderr, "[H21] no se pudo escribir %s/bo1_launch.txt\n", pd.c_str());
+        g_h10RestartApp(); return;
+    }
 #ifndef BO1_APP
     char exe[4096] = ""; uint32_t n = sizeof exe;
 #ifdef __APPLE__
@@ -509,8 +608,14 @@ void Init(int W, int H)
         // imagen de carga original: loadscreen_zombie_<clave> (los de WaW van sin "cod5_": loadscreen_zombie_factory, ..._sumpf)
         char n[64]; snprintf(n, sizeof n, "loadscreen_zombie_%s", kMaps[i].token); for (char *c = n; *c; ++c) *c = (char)tolower((unsigned char)*c); s_mapMat[i] = LoadMat(n); imgs += s_mapMat[i] != nullptr;
         s_mapOk[i] = H18_MapPlayable(kMaps[i].zone);
-        { char k[64]; snprintf(k, sizeof k, "MENU_ZOMBIE_%s_DESC", kMaps[i].token); s_desc[i] = LocFind(k); } if (s_desc[i].empty()) s_desc[i] = kMaps[i].fallback;
-        fprintf(stderr, "[H21] %-22s imagen %s, datos %s\n", kMaps[i].zone, s_mapMat[i] ? n : "NO (fondo con el nombre)", s_mapOk[i] ? "jugables" : "NO instalados");
+    }
+    LoadDescriptions();
+    for (int i = 0; i < kNumMaps; ++i) {
+        const bool own = !s_desc[i].empty(); if (!own) s_desc[i] = kMaps[i].fallback;
+        char n[64]; snprintf(n, sizeof n, "loadscreen_zombie_%s", kMaps[i].token); for (char *c = n; *c; ++c) *c = (char)tolower((unsigned char)*c);
+        fprintf(stderr, "[H21] %-22s imagen %s, datos %s, descripcion %s\n", kMaps[i].zone, s_mapMat[i] ? n : "NO (fondo con el nombre)", s_mapOk[i] ? "jugables" : "NO instalados",
+            own ? "de las zonas" : "propia (MENU_ZOMBIE_*_DESC no cargada)");
+        if (Trace() && own) fprintf(stderr, "[H21]   \"%s\"\n", s_desc[i].c_str());
     }
     fprintf(stderr, "[H21] menu listo: fondo %s, marco %s, %d/%d imagenes de mapa, %.0f ms; fuentes %s/%s/%s\n", s_bg ? "si" : "no", s_frame ? "si" : "no", imgs, kNumMaps, NowMs() - t0,
         s_fBig && s_fBig->fontName ? s_fBig->fontName.get() : "-", s_fNormal && s_fNormal->fontName ? s_fNormal->fontName.get() : "-", s_fSmall && s_fSmall->fontName ? s_fSmall->fontName.get() : "-");
@@ -529,7 +634,9 @@ int H21_Run(int W, int H)
     if (!getenv("H21_MENU") || !atoi(getenv("H21_MENU"))) return -1;
     fprintf(stderr, "[H21] OLA U1: menu principal (%dx%d)\n", W, H);
     Init(W, H);
+    g_h21Running = true;
     for (int frame = 1; !s_quit; ++frame) {
+        if (g_h21PollEvents) g_h21PollEvents();   // OLA U2: la app Android bombea sus eventos (toques, teclas, pausa) aqui
         PilotStep(frame);
         rgp.needSortMaterials = 0;   // como world_h4 (H4_Frame): la lista 2D no usa el orden de materiales
         R_BeginFrame(); R_BeginSharedCmdList(); R_AddCmdProjectionSet2D();
@@ -537,6 +644,7 @@ int H21_Run(int W, int H)
         R_EndFrame(); R_IssueRenderCommands(3u);   // presenta y atiende la ventana (WinPump en el Present del dispositivo)
         if (s_launch) { s_launch = false; Launch(s_launchMap); }
     }
+    g_h21Running = false;
     fprintf(stderr, "[H21] fin del menu\n");
     return 0;
 }
@@ -546,4 +654,6 @@ int H21_Run(int W, int H)
 void H21_Touch(int phase, float fx, float fy) { const float px = fx * s_W, py = fy * s_H; if (phase == 0) PointerDown(px, py); else if (phase == 1) PointerMove(px, py); else PointerUp(px, py); }
 void H21_Key(int key) { Key(key); }
 void H21_Char(int c) { TypeChar(c); }   // Android: teclado en pantalla para el nombre
+bool H21_Back() { return Back(); }      // OLA U2: Atras del sistema; false = salir de la app
+bool H21_EditingName() { return s_editName; }   // OLA U2: la app muestra/oculta el teclado en pantalla
 int (*g_h21Frontend)(int W, int H) = H21_Run;   // main2.cpp (puntero de datos: a cero si esta TU no esta)

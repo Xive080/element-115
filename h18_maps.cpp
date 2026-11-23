@@ -87,6 +87,7 @@ const char *H18_Map() { return s_map.empty() ? kDefaultMap : s_map.c_str(); }
 const char *H18_MapDir() { return s_dir.c_str(); }
 const char *H18_BaseDir() { return s_base.c_str(); }                                                  // OLA U1 (h21_menu.cpp): players/ y .iwd de la base
 bool H18_MapPlayable(const char *zone) { return Find(zone) && !PickDir(zone).empty(); }             // OLA U1: datos completos instalados
+const char *H18_MapDirFor(const char *zone) { static std::string d; d = Find(zone) ? PickDir(zone) : std::string(); return d.c_str(); }   // OLA U2 (h21: en_patch.ff de cada mapa)
 
 // al principio de main / bo1_engine_main, antes de leer P3_GAMEDATA o el config
 void H18_ResolveBoot(int argc, char **argv)
@@ -143,6 +144,7 @@ void H18_EndLoadVideo() { if (g_h18EndVideo) g_h18EndVideo(); }
 void H18_PlayLoadVideo()
 {
     const H18Map *m = Find(H18_Map()); if (!m || !m->video || !*m->video || getenv("H18_NOVIDEO")) return;
+    if (getenv("H21_MENU") && atoi(getenv("H21_MENU"))) { fprintf(stderr, "[H18] video de carga: menu principal (H21_MENU), se pone al entrar en el mapa\n"); return; }   // OLA U2
     const std::string path = s_dir + "/" + m->video;
     if (!IsFile(path)) { fprintf(stderr, "[H18] video de carga: no hay %s (se sigue sin video)\n", path.c_str()); return; }
     if (!g_h18PlayVideo) { fprintf(stderr, "[H18] video de carga: %s presente; reproductor pendiente (stub OLA M0), se salta\n", path.c_str()); return; }
