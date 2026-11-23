@@ -60,6 +60,11 @@
 #include <string>
 #include <vector>
 #include "h19_mapcl.h"
+#ifdef H6SND
+#include <sound/snd_public_async.h>   // OLA F1: SND_SetSnapshot (setgroupsnapshot del CSC)
+#include <sound/snd_bank.h>
+#include <sound/snd_utils.h>
+#endif
 
 bool H7_VisionSetNaked(const char *name, float seconds) __attribute__((weak));   // h7_gfx.cpp
 void H7C_ClientVolFog(const float *v, int transitionMs) __attribute__((weak));     // h7c_gfx.cpp: setVolFog del CSC
@@ -127,7 +132,7 @@ void Wake(const std::string &ev, int now)
 }
 
 // ---- sonido pedido desde el hilo de render; lo reproduce AudioFrame (hilo de servidor). slot = entidad falsa propia (se crea alli)
-struct Snd { int kind; int slot; float org[3]; std::string alias; float fade; };   // kind: 0 playsound en org, 1 bucle en slot, 2 parar bucle, 3 mover slot
+struct Snd { int kind; int slot; float org[3]; std::string alias; float fade; };   // kind: 0 playsound en org, 1 bucle en slot, 2 parar bucle, 3 mover slot, 4 snapshot de mezcla (alias = nombre)
 std::mutex s_sndMu; std::vector<Snd> s_sndQ;
 void QSnd(int kind, int slot, const float *org, const char *alias, float fade = 0)
 {
@@ -794,11 +799,14 @@ void Notify(const std::string &ev, int now)
     else if (ev == "monkey_start") { VisionApply("zombie_cosmodrome_monkey", 4); FogApply("monkey", 3); fprintf(stderr, "[H19] %s: ronda de monos t=%d\n", kName, now); }
     else if (ev == "monkey_stop") { VisionRemove("zombie_cosmodrome_monkey"); FogRemove("monkey"); fprintf(stderr, "[H19] %s: fin de la ronda de monos t=%d\n", kName, now); }
     else if (ev == "MRS") QSnd(0, -1, nullptr, "zmb_ape_intro_sonicboom_fnt");   // cosmodrome_monkey_round_start_listener (sin sacudida)
-    else if (ev == "sia") {   // samantha_is_angry_earthquake_and_rumbles (sin vibracion ni snapshot)
+    else if (ev == "sia") {   // samantha_is_angry_earthquake_and_rumbles
+        QSnd(4, 0, nullptr, "zmb_samantha_scream");   // snd_set_snapshot("zmb_samantha_scream") -> setgroupsnapshot (OLA F1)
         if (g_entities[0].r.inuse) Quake(0.4f, 10.0f, g_entities[0].r.currentOrigin, 150);   // self Earthquake(.4, 10, self.origin, 150)
-        fprintf(stderr, "[H19] %s: Samantha enfadada (sia): sacudida 10 s y vision nopower t=%d\n", kName, now);
+        // do_that_sam_rumble: PlayRumbleOnEntity(0, "damage_heavy") cada 0,1 s durante 4 s. No-op: el Mac no tiene vibracion y el arnes no
+        // lleva rumble de mando (en el Fold seria el Vibrator del sistema; no se ha pedido)
+        fprintf(stderr, "[H19] %s: Samantha enfadada (sia): sacudida 10 s, vision nopower y snapshot zmb_samantha_scream 6 s (rumble no-op) t=%d\n", kName, now);
         VisionApply("zombie_cosmodrome_nopower", 8);
-        After(now + 6000, [](int) { VisionRemove("zombie_cosmodrome_nopower", 3.0f); });
+        After(now + 6000, [](int) { VisionRemove("zombie_cosmodrome_nopower", 3.0f); QSnd(4, 0, nullptr, "default"); });   // wait(6); snd_set_snapshot("default")
     }
     else if (ev == "RX") RocketExplode(now);
     else if (ev == "L_R" || ev == "L_G") DockLights(ev == "L_R", now);
@@ -924,6 +932,10 @@ void AudioFrame(bool)
         else if (s.kind == 1) { const int f = FakeOf(s.slot, s.org); if (f) { memcpy((float *)H19A_FakeOrg(f), s.org, 12); if (!H19A_FakeLoopIs(f, s.alias.c_str())) H19A_PlayLoop(f, s.alias.c_str(), s.fade); } }
         else if (s.kind == 2) { auto it = s_slotFake.find(s.slot); if (it != s_slotFake.end() && it->second) H19A_StopLoop(it->second, s.fade); }
         else if (s.kind == 3) { auto it = s_slotFake.find(s.slot); if (it != s_slotFake.end() && it->second) memcpy((float *)H19A_FakeOrg(it->second), s.org, 12); }
+        else if (s.kind == 4) {   // OLA F1: snd_set_snapshot -> snd_snapshot_think -> setgroupsnapshot = CScr_SetGroupSnapshot (cg_scr_main.cpp)
+            SND_SetSnapshot(SND_SNAPSHOT_SCRIPT, s.alias.c_str(), 0.0f, 1.0f);
+            fprintf(stderr, "[H19] %s sonido: snapshot de script '%s'%s\n", kName, s.alias.c_str(), SND_GetSnapshotById(SND_HashName(s.alias.c_str())) ? "" : " (NO esta en los datos: queda default)");
+        }
     }
 }
 void AudioStatus(std::string &out)

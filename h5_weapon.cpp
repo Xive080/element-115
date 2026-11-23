@@ -28,6 +28,7 @@ static inline void *H5_AlignedAlloc(size_t a, size_t n) { void *p = nullptr; ret
 
 #include <string>
 #include <vector>
+#include <array>
 #include <math.h>
 #include <server/sv_world.h>
 #include <game_mp/g_combat_mp.h>
@@ -36,6 +37,8 @@ static inline void *H5_AlignedAlloc(size_t a, size_t n) { void *p = nullptr; ret
 #include <clientscript/scr_const.h>
 #include <clientscript/cscr_stringlist.h>
 #include <game_mp/g_spawn_mp.h>
+#include <game/g_items.h>   // OLA F1: Add_Ammo (municion)
+#include <client_mp/g_client_mp.h>   // OLA F1: SetClientViewAngle, G_GetPlayerViewOrigin (dispara)
 #include <universal/com_math.h>
 
 static int g_h5eShots, g_h5eHits, g_h5eActorHits, g_h5eDamage, g_h5eKills, g_h5eReloads, g_h5eLogged;
@@ -155,6 +158,10 @@ static void H5E_PlaceNearActor()
 //   jump|melee|frag [MS]     (OLA E2b) mantiene salto (bit 10), cuchillo (bit 2) o granada letal (bit 14) MS ms (200/200/300)
 //   tact [MS]                (OLA E3a) mantiene el boton de la granada tactica (bit 15 del usercmd) MS (300) ms
 //   weap NOMBRE              (OLA E3a) cambia al arma NOMBRE si el jugador la tiene (como elegirla con weapnext)
+//   dispara X Y Z|yo R MS    (OLA F1) apunta y dispara al actor vivo mas cercano en planta (H5E_DisparaFrame)
+//   acude X Y Z [X Y Z...]   (OLA F1) acude con USAR a un bucle de sonido que aparezca junto a uno de los puntos (H5E_AcudeFrame)
+//   municion ARMA N          (OLA F1) Add_Ammo al jugador (granadas, cargador)
+//   tpdmg TN IDX [R [RMIN]]  (OLA F1) al suelo desde cuya mano la explosion alcanza la IDX-esima entidad (CanDamage de G_RadiusDamage)
 bool g_h5eViewResync = false;
 unsigned g_h5eWeapReq;   // OLA E3a: lo consume h5_play.cpp (H5P_CmdButtons)
 int g_h5eUseUntil, g_h5eFireUntil; bool g_h5eShotReq;
@@ -162,8 +169,72 @@ int g_h5eBtnUntil[16];   // OLA E2b: jump/melee/frag MS del guion -> bit del use
 namespace {
 struct TimedAct { int t; std::string a; bool done; };
 std::vector<TimedAct> s_timed; bool s_timedInit;
+// OLA F1: suelo bajo (X,Y) entre Z+160 y Z-240 para la capsula del jugador, probando el punto y anillos de 24/48 u (false = no hay)
+bool H5E_FloorNear(const float *p, int self, float *out)
+{
+    const float mins[3] = { -15.0f, -15.0f, 0.0f }, maxs[3] = { 15.0f, 15.0f, 70.0f };
+    for (float r = 0.0f; r <= 48.5f; r += 24.0f) for (int k = 0; k < (r > 0 ? 8 : 1); ++k) {
+        const float a = k * 0.78539816f, o[2] = { p[0] + r * cosf(a), p[1] + r * sinf(a) };
+        for (float dz = 160.0f; dz >= 0.0f; dz -= 40.0f) {
+            const float from[3] = { o[0], o[1], p[2] + dz }, to[3] = { o[0], o[1], p[2] - 240.0f };
+            trace_t tr; col_context_t ctx; G_TraceCapsule(&tr, from, mins, maxs, to, self, 0x2810011, &ctx);
+            if (tr.startsolid || tr.allsolid || tr.fraction >= 1.0f) continue;
+            out[0] = o[0]; out[1] = o[1]; out[2] = from[2] + (to[2] - from[2]) * tr.fraction + 1.0f; return true;
+        }
+    }
+    return false;
+}
+// OLA F1: acude X Y Z [X Y Z...]: desde su tiempo y hasta el final, cada 0,25 s, si una entidad con bucle de sonido (s.loopSoundId) aparece
+// a < 40 u de uno de los puntos (el script_origin "looper" del telefono rojo de Ascension, que suena 10 s en un sitio al azar a los 120-300 s),
+// el jugador va andando... aqui teletransportado al suelo junto al punto, mirandolo, y mantiene USAR 2 s (lo que hace un jugador que lo oye).
+std::vector<std::array<float, 3>> s_acude; int s_acudeNext, s_acudeLastEnt = -1, s_acudeLastT;
+void H5E_AcudeFrame(gentity_s *pl)
+{
+    if (s_acude.empty() || !pl->r.inuse || !pl->client || level.time < s_acudeNext) return;
+    s_acudeNext = level.time + 250;
+    for (int i = 0; i < level.num_entities; ++i) { gentity_s *e = &g_entities[i];
+        if (!e->r.inuse || !e->s.loopSoundId || e == pl) continue;
+        for (const auto &p : s_acude) {
+            const float dx = e->r.currentOrigin[0] - p[0], dy = e->r.currentOrigin[1] - p[1], dz = e->r.currentOrigin[2] - p[2];
+            if (dx * dx + dy * dy > 1600.0f || fabsf(dz) > 60.0f) continue;
+            if (i == s_acudeLastEnt && level.time - s_acudeLastT < 12000) return;   // ya acudido a este bucle
+            float fl[3]; const bool ok = H5E_FloorNear(p.data(), pl->s.number, fl); if (!ok) memcpy(fl, p.data(), 12);
+            float dir[3] = { p[0] - fl[0], p[1] - fl[1], p[2] - (fl[2] + 60.0f) }, ang[3]; if (fabsf(dir[0]) + fabsf(dir[1]) < 1.0f) dir[0] = 1.0f;
+            vectoangles(dir, ang); ang[2] = 0; if (ang[0] > 180.0f) ang[0] -= 360.0f;
+            TeleportPlayer(pl, fl, ang); g_h5eViewResync = true; g_h5eUseUntil = level.time + 2000;
+            s_acudeLastEnt = i; s_acudeLastT = level.time;
+            fprintf(stderr, "[H5E] t=%d guion: acude: bucle de sonido en la entidad %d (%.0f,%.0f,%.0f): jugador en (%.0f,%.0f,%.0f)%s y USAR 2 s\n", level.time, i,
+                e->r.currentOrigin[0], e->r.currentOrigin[1], e->r.currentOrigin[2], fl[0], fl[1], fl[2], ok ? "" : " (SIN suelo)");
+            return;
+        }
+    }
+}
+// OLA F1: dispara X Y Z R MS | dispara yo R MS: durante MS ms, cada 0,25 s, apunta (SetClientViewAngle) a la cabeza del actor vivo mas
+// cercano en planta a (X,Y) (o al jugador) dentro de R y pulsa DISPARO 100 ms (pulsaciones sueltas: sirve tambien con armas semiautomaticas)
+struct Dispara { float p[3]; float R; bool yo; int until; } s_disp; int s_dispNext;
+void H5E_DisparaFrame(gentity_s *pl)
+{
+    if (!pl->r.inuse || !pl->client || level.time > s_disp.until || level.time < s_dispNext) return;
+    s_dispNext = level.time + 250;
+    const float *c = s_disp.yo ? pl->r.currentOrigin : s_disp.p; gentity_s *best = nullptr; float bd = s_disp.R * s_disp.R;
+    for (int i = 0; i < level.num_entities; ++i) { gentity_s *e = &g_entities[i];
+        if (!e->r.inuse || !e->actor || e->health <= 0 || e->health >= 100000) continue;   // fuera jefes invulnerables (el Director de Coast: 1000000)
+        const float dx = e->r.currentOrigin[0] - c[0], dy = e->r.currentOrigin[1] - c[1], d = dx * dx + dy * dy;
+        if (d < bd) { bd = d; best = e; } }
+    if (!best) return;
+    float tg[3], eye[3], dir[3], ang[3];
+    if (!G_DObjGetWorldTagPos(best, scr_const.j_head, tg)) { memcpy(tg, best->r.currentOrigin, 12); tg[2] += 40.0f; }
+    G_GetPlayerViewOrigin(&pl->client->ps, eye);
+    for (int k = 0; k < 3; ++k) dir[k] = tg[k] - eye[k];
+    vectoangles(dir, ang); ang[2] = 0; if (ang[0] > 180.0f) ang[0] -= 360.0f;
+    SetClientViewAngle(pl, ang); g_h5eViewResync = true; g_h5eFireUntil = level.time + 100;
+    static int lastEnt = -1; if (best->s.number != lastEnt) { lastEnt = best->s.number;
+        fprintf(stderr, "[H5E] t=%d guion: dispara al actor %d (salud %d) en (%.0f,%.0f,%.0f)\n", level.time, best->s.number, best->health, tg[0], tg[1], tg[2]); }
+}
 void H5E_Timed()
 {
+    H5E_AcudeFrame(&g_entities[0]);
+    H5E_DisparaFrame(&g_entities[0]);
     if (!s_timedInit) {
         s_timedInit = true;
         if (const char *e = getenv("H5_TIMED")) { std::string all = e; size_t p0 = 0;
@@ -240,6 +311,11 @@ void H5E_Timed()
               const unsigned cw = pl->client ? pl->client->ps.weapon : 0, alt = cw ? BG_GetWeaponVariantDef(cw)->altWeaponIndex : 0;
               fprintf(stderr, "[H5E] guion: weap %s -> %u (actual %s estado %d, alternativa %s %s)\n", wn, g_h5eWeapReq, cw ? BG_WeaponName(cw) : "-",
                   pl->client ? (int)pl->client->ps.weaponstate : -1, alt ? BG_WeaponName(alt) : "-", alt && BG_PlayerHasWeapon(&pl->client->ps, alt) ? "en mano" : "NO llevada"); } }
+        else if (!strcmp(cmd, "municion") && pl->client) {   // OLA F1: municion ARMA N -> Add_Ammo (g_items.cpp), p. ej. granadas para la granada santa
+            char wn[64] = ""; int n = 1; sscanf(ta.a.c_str(), "%*s %63s %d", wn, &n);
+            const unsigned wi = (unsigned)BG_GetWeaponIndexForName(wn);
+            const int got = wi ? Add_Ammo(pl, wi, 0, n, 1) : 0;
+            fprintf(stderr, "[H5E] guion: municion %s +%d -> %s (%d)\n", wn, n, wi ? "ok" : "arma desconocida", got); }
         else if (!strcmp(cmd, "tact")) { int ms = 300; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eBtnUntil[15] = level.time + ms; }   // OLA E3a: granada tactica (bit 15: agujero negro, munecas)
         else if (!strcmp(cmd, "shot")) g_h5eShotReq = true;
         else if (!strcmp(cmd, "entpos")) {   // OLA F1: entpos TARGETNAME -> origen de cada entidad con ese targetname (MoveZ/MoveTo del GSC)
@@ -248,6 +324,47 @@ void H5E_Timed()
                 if (!t->r.inuse || !t->targetname || strcmp(SL_ConvertToString(t->targetname, SCRIPTINSTANCE_SERVER), tn)) continue;
                 fprintf(stderr, "[H5E] guion: entpos %s #%d -> (%.1f,%.1f,%.1f)\n", tn, i, t->r.currentOrigin[0], t->r.currentOrigin[1], t->r.currentOrigin[2]); ++n; }
             if (!n) fprintf(stderr, "[H5E] guion: entpos %s -> NO hay entidad con ese targetname\n", tn); }
+        else if (!strcmp(cmd, "dispara")) {   // OLA F1: ver H5E_DisparaFrame
+            int ms = 5000; s_disp.yo = !strncmp(ta.a.c_str() + 8, "yo", 2);
+            if (s_disp.yo) sscanf(ta.a.c_str(), "%*s %*s %f %d", &s_disp.R, &ms); else sscanf(ta.a.c_str(), "%*s %f %f %f %f %d", &s_disp.p[0], &s_disp.p[1], &s_disp.p[2], &s_disp.R, &ms);
+            s_disp.until = level.time + ms; }
+        else if (!strcmp(cmd, "acude")) {   // OLA F1: ver H5E_AcudeFrame
+            std::array<float, 3> p; int n = 0; const char *s = ta.a.c_str() + 5;
+            while (sscanf(s, "%f %f %f%n", &p[0], &p[1], &p[2], &n) == 3) { s_acude.push_back(p); s += n; }
+            fprintf(stderr, "[H5E] guion: acude a %zu puntos\n", s_acude.size()); }
+        else if (!strcmp(cmd, "tpdmg") && pl->r.inuse && pl->client) {   // OLA F1: tpdmg TARGETNAME IDX [R]: la IDX-esima entidad con ese
+            // targetname (orden de GetEntArray = numero de entidad); el suelo a <= R (160) cuyo punto de la mano (suelo + 48) tiene CanDamage > 0
+            // contra ella (la prueba de G_RadiusDamage, mascara 0x802013): ahi una granada cocinada en la mano le hace dano de explosion
+            char tn[96] = ""; int idx = 0; float R = 160.0f, Rmin = 0.0f; sscanf(ta.a.c_str(), "%*s %95s %d %f %f", tn, &idx, &R, &Rmin); gentity_s *t = nullptr;
+            for (int i = 0, k = 0; i < level.num_entities; ++i) { gentity_s *e = &g_entities[i];
+                if (!e->r.inuse || !e->targetname || strcmp(SL_ConvertToString(e->targetname, SCRIPTINSTANCE_SERVER), tn)) continue;
+                if (k++ == idx) { t = e; break; } }
+            if (!t) fprintf(stderr, "[H5E] guion: tpdmg %s %d: no existe\n", tn, idx);
+            else {
+                float c[3]; for (int k = 0; k < 3; ++k) c[k] = 0.5f * (t->r.absmin[k] + t->r.absmax[k]);
+                int nAir = 0, nAll = 0;   // rejilla 3D de 16 u en la caja ampliada 64 u: cuantos puntos (en aire) la ven
+                for (float x = t->r.absmin[0] - 64; x <= t->r.absmax[0] + 64; x += 16) for (float y = t->r.absmin[1] - 64; y <= t->r.absmax[1] + 64; y += 16)
+                    for (float z = t->r.absmin[2] - 64; z <= t->r.absmax[2] + 64; z += 16) { const float q[3] = { x, y, z }; ++nAll;
+                        if (CanDamage(t, nullptr, q, -1.0f, nullptr, 0x802013) > 0.0) ++nAir; }
+                const float mins[3] = { -15.0f, -15.0f, 0.0f }, maxs[3] = { 15.0f, 15.0f, 70.0f };
+                float best[3] = { 0, 0, 0 }, bd = 1e30f; int nFloor = 0;
+                for (float r = Rmin; r <= R + 0.5f; r += 16.0f) for (int k = 0; k < 16; ++k) {
+                    const float a = k * 0.39269908f, o[2] = { c[0] + r * cosf(a), c[1] + r * sinf(a) };
+                    for (float dz = 160.0f; dz >= -160.0f; dz -= 32.0f) {
+                        const float from[3] = { o[0], o[1], c[2] + dz }, to[3] = { o[0], o[1], c[2] + dz - 400.0f };
+                        trace_t tr; col_context_t ctx; G_TraceCapsule(&tr, from, mins, maxs, to, pl->s.number, 0x2810011, &ctx);
+                        if (tr.startsolid || tr.allsolid || tr.fraction >= 1.0f) continue;
+                        const float fl = from[2] + (to[2] - from[2]) * tr.fraction + 1.0f, hand[3] = { o[0], o[1], fl + 48.0f };
+                        if (CanDamage(t, nullptr, hand, -1.0f, nullptr, 0x802013) <= 0.0) continue;
+                        ++nFloor; const float d = (hand[0] - c[0]) * (hand[0] - c[0]) + (hand[1] - c[1]) * (hand[1] - c[1]) + (hand[2] - c[2]) * (hand[2] - c[2]);
+                        if (d < bd) { bd = d; best[0] = o[0]; best[1] = o[1]; best[2] = fl; }
+                    } }
+                fprintf(stderr, "[H5E] guion: tpdmg %s %d: entidad %d caja (%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f), rejilla %d/%d puntos la ven, suelos validos %d%s\n", tn, idx,
+                    t->s.number, t->r.absmin[0], t->r.absmin[1], t->r.absmin[2], t->r.absmax[0], t->r.absmax[1], t->r.absmax[2], nAir, nAll, nFloor, nFloor ? "" : ": NO se mueve");
+                if (nFloor) { float dir[3] = { c[0] - best[0], c[1] - best[1], c[2] - (best[2] + 60.0f) }, ang[3]; vectoangles(dir, ang); ang[2] = 0; if (ang[0] > 180.0f) ang[0] -= 360.0f;
+                    TeleportPlayer(pl, best, ang); g_h5eViewResync = true;
+                    fprintf(stderr, "[H5E] guion: tpdmg: jugador en (%.0f,%.0f,%.0f), mano a %.0f u del centro\n", best[0], best[1], best[2], sqrtf(bd)); }
+            } }
         else if (!strcmp(cmd, "usetn") && pl->r.inuse) {   // OLA S1: usetn TARGETNAME -> el trigger con ese targetname mas cercano recibe "trigger" del jugador
             char tn[96] = ""; sscanf(ta.a.c_str(), "%*s %95s", tn); gentity_s *best = nullptr; float bd = 1e30f;
             for (int i = 0; i < level.num_entities; ++i) { gentity_s *t = &g_entities[i];
