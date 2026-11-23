@@ -10,12 +10,18 @@
 // Hasta E2a solo Shangri-La lo tenia (dentro de maps/h19_zombie_temple.cpp); aqui queda comun. Vive en maps/ porque build.sh compila
 // maps/h19_*.cpp con un comodin; no tiene entrada en kTable. Lo llama h5_audio_cl.cpp (ClientSysStart, LevelNotify, ClientSysFrame).
 // Los structs salen de las MapEnts del mapa (script_struct). La distancia la corta el propio motor de sonido (distReverbMax del alias).
+// OLA S (selftests): looper y line_emitter van por los emisores del motor como CScr_SoundLoopEmitter / CScr_SoundLineEmitter
+// (SND_PlayLoopAt / SND_PlayLineAt: 256 y 128 ranuras que SND_UpdateStaticSounds toca cada frame sin gastar playbacks; el punto de
+// la linea mas cercano al oyente lo calcula el motor). Antes eran playloopsound en entidades falsas: cada uno gastaba un playback y
+// los 213 bucles de Five agotaban los 0x94 ("ran out of playbacks").
 // H19_SNDEMIT=0 lo apaga.
 #if defined(H5G) && defined(H6SND)
 #include <universal/q_shared.h>
 #include <game_mp/g_main_mp.h>
 #include <game_mp/g_utils_mp.h>
 #include <bgame/bg_local.h>
+#include <sound/snd_public_async.h>
+#include <sound/snd_bank.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,14 +32,15 @@
 #include "h19_mapcl.h"
 
 namespace {
-struct Emit { int kind; std::string snd, notify; float a[3], b[3]; bool on; int fake; float wmin, wmax; double next; };   // kind 0 random, 1 looper, 2 linea
+struct Emit { int kind; std::string snd, notify; float a[3], b[3]; bool on; unsigned id; float wmin, wmax; double next; };   // kind 0 random, 1 looper, 2 linea
 std::vector<Emit> s_emit;
 int s_count[3], s_plays, s_toggles;
 bool s_started;
 float ARand(float a, float b) { return a + (b - a) * (float)rand() / (float)RAND_MAX; }   // RandomFloatRange
 void Toggle(Emit &e)
 {
-    if (e.kind == 1 || e.kind == 2) { if (e.on) H19A_StopLoop(e.fake, 0); else H19A_PlayLoop(e.fake, e.snd.c_str(), 0); }   // soundstoploopemitter / soundloopemitter
+    if (e.kind == 1) { if (e.on) SND_StopLoopAt(e.id, e.a); else SND_PlayLoopAt(e.id, e.a); }   // soundstoploopemitter / soundloopemitter
+    else if (e.kind == 2) { if (e.on) SND_StopLineAt(e.id, e.a, e.b); else SND_PlayLineAt(e.id, e.a, e.b); }   // soundstoplineemitter / soundlineemitter
     e.on = !e.on; ++s_toggles;
 }
 } // namespace
@@ -53,8 +60,8 @@ void H19S_EmittersStart()
         if (e.kind == 2) { const char *t = H19_Str(k, "target"); auto it = t ? byTn.find(t) : byTn.end(); if (it == byTn.end() || !H19_Vec(*it->second, "origin", e.b)) continue; }
         if (e.kind == 0) { const char *a = H19_Str(k, "script_wait_min"), *b = H19_Str(k, "script_wait_max"); e.wmin = a ? (float)atof(a) : 1; e.wmax = b ? (float)atof(b) : 3;
             e.notify.clear(); e.next = H19A_NowMs() + ARand(e.wmin, e.wmax) * 1000.0; }
-        else { const char *si = H19_Str(k, "script_int"); const bool started = !si || atoi(si) != 0; e.fake = H19A_FakeAt(e.a); if (!e.fake) continue;
-            if (started) { H19A_PlayLoop(e.fake, e.snd.c_str(), 0); e.on = true; } }
+        else { const char *si = H19_Str(k, "script_int"); const bool started = !si || atoi(si) != 0; e.id = SND_FindAliasId(e.snd.c_str());
+            if (started) { if (e.kind == 1) SND_PlayLoopAt(e.id, e.a); else SND_PlayLineAt(e.id, e.a, e.b); e.on = true; } }
         ++s_count[e.kind]; s_emit.push_back(e);
     }
     std::string ns; for (const Emit &e : s_emit) if (!e.notify.empty() && ns.find(" " + e.notify + " ") == std::string::npos) ns += " " + e.notify + " ";
@@ -71,15 +78,8 @@ void H19S_EmittersFrame()
 {
     if (s_emit.empty()) return;
     const double now = H19A_NowMs();
-    gentity_s *pl = H19A_PlayerEnt(); float eye[3] = { 0, 0, 0 };
-    if (pl && pl->client) { memcpy(eye, pl->client->ps.origin, 12); eye[2] += pl->client->ps.viewHeightCurrent; }
-    for (Emit &e : s_emit) {
-        if (e.kind == 0) { if (now >= e.next) { H19A_WorldSound(e.a, e.snd.c_str()); ++s_plays; e.next = now + ARand(e.wmin, e.wmax) * 1000.0; } continue; }   // soundRandom_Thread
-        if (e.kind != 2 || !e.on) continue;
-        float d[3], w[3], dd = 0, t = 0; for (int k = 0; k < 3; ++k) { d[k] = e.b[k] - e.a[k]; w[k] = eye[k] - e.a[k]; dd += d[k] * d[k]; t += w[k] * d[k]; }   // punto de la linea mas cercano al oyente
-        t = dd > 0 ? std::max(0.0f, std::min(1.0f, t / dd)) : 0;
-        float *o = (float *)H19A_FakeOrg(e.fake); for (int k = 0; k < 3; ++k) o[k] = e.a[k] + d[k] * t;
-    }
+    for (Emit &e : s_emit)
+        if (e.kind == 0 && now >= e.next) { H19A_WorldSound(e.a, e.snd.c_str()); ++s_plays; e.next = now + ARand(e.wmin, e.wmax) * 1000.0; }   // soundRandom_Thread
 }
 
 void H19S_EmittersStatus(std::string &out)
