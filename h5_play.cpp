@@ -423,7 +423,8 @@ static void H5F_DrawHud(int W, int H)
     const H5FState &s = s_f;
     const float sc = (float)H / 720.0f;
     extern bool g_h10MenuOpen;   // OLA 10: con el menu de pausa original abierto no se dibuja el rotulo provisional
-    if (g_h5pPause && !g_h10MenuOpen) { const float w[4] = { 1, 1, 1, 1 }; R_AddCmdDrawText((char *)"PAUSA", 0x7fffffff, s_hudBig, W * 0.5f - 70 * sc, H * 0.5f - 40 * sc, 1.5f * sc, 1.5f * sc, 0, w, 3); }
+    extern bool H23_Editing() __attribute__((weak));   // OLA U2: en Customize HUD no hay rotulo de pausa
+    if (g_h5pPause && !g_h10MenuOpen && !(H23_Editing && H23_Editing())) { const float w[4] = { 1, 1, 1, 1 }; R_AddCmdDrawText((char *)"PAUSA", 0x7fffffff, s_hudBig, W * 0.5f - 70 * sc, H * 0.5f - 40 * sc, 1.5f * sc, 1.5f * sc, 0, w, 3); }
     const float white[4] = { 1, 1, 1, 0.95f }, red[4] = { 0.9f, 0.12f, 0.1f, 1 }, gold[4] = { 1.0f, 0.85f, 0.3f, 1 }, shade[4] = { 0, 0, 0, 0.35f };
     char b[128];
     extern bool H7C_DrawHud(int, int, int, int, int, int) __attribute__((weak));   // OLA 7c: HUD con el arte original (h7c_gfx.cpp)
@@ -502,6 +503,7 @@ int H5P_Run(int maxFrames, bool view)
     g_h5vDrawPlayer = chase;
     s_hudOn = !getenv("H5_HUD") || atoi(getenv("H5_HUD"));
     { void H10_Install(); H10_Install(); }   // OLA 10: ajustes (H10=0 lo quita)
+    { void H23_Install(); H23_Install(); }   // OLA U2: controles tactiles (h23_touch.cpp): comando h23_customize; en el Mac con H23_PILOT es la entrada
     { void H11_Install(); H11_Install(); }   // OLA 11: anfitrion en red (solo con H11_HOST=1)
     if (view && (s_hudOn || g_h10Draw2D)) g_h4Draw2D = H5F_Draw2D;
     g_h5wViewOverride = !chase;

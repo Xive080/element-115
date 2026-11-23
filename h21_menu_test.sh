@@ -8,10 +8,10 @@
 #   OSUF=u2 (binario out_vk_<OSUF>_h5/p3), SAFE=l,t,r,b (H10_SAFE), LAUNCH=1 deja que el toque final lance el mapa (relanza el proceso:
 #   carga con el video de carga y juega H5_PLAY_SECONDS, 25 por defecto), TRACE=1, COOP=0 (como el APK: co-op como hueco).
 # Salida: <salida>/menu.log y <salida>/shot_h21_<etiqueta>.png por cada "shot <etiqueta>" del piloto.
-cd "$(dirname "$0")"; HERE=$PWD
 OUT=$1; PERF=${2:-mac}; PILOT=$3
 [ -n "$OUT" ] || { echo "uso: h21_menu_test.sh <salida> <perfil> [piloto]"; exit 2; }
 mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
+cd "$(dirname "$0")"; HERE=$PWD
 case "$PERF" in
   plegado) W=2092; H=1080; DPI=420;;
   abierto) W=2208; H=1840; DPI=360;;

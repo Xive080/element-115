@@ -855,8 +855,23 @@ static void PatchRootMenu()
 // (boton, marco y etiqueta de la pestana 2) y los atajos de flecha izq/der que llevan a ella desde cada panel de ajustes.
 static bool ScriptHas(GenericEventScript *sc, const char *what) { for (; sc; sc = sc->next.get()) if (sc->action && strstr(sc->action.get(), what)) return true; return false; }
 static bool HandlerHas(GenericEventHandler *h, const char *what) { for (; h; h = h->next.get()) if (ScriptHas(h->eventScript.get(), what)) return true; return false; }
+extern bool g_h23Present;   // h23_touch.cpp (OLA U2): con controles tactiles la pestana CONTROLS abre Customize HUD (comando h23_customize)
 static void PatchControlsTab()
 {
+    if (g_h23Present && !getenv("H10_NOCUSTOMIZE")) {
+        int n = 0;
+        for (int k = 0; k < s_dc->menuCount; ++k) {
+            menuDef_t *m = s_dc->Menus[k]; const char *nm = m->window.name ? m->window.name.get() : "";
+            if (strncmp(nm, "options_", 7) || !strcmp(nm, "options_controls_new_pc")) continue;
+            PTR32(ItemKeyHandler) *pp = &m->onKey;   // atajos de flecha a la pestana: fuera (abririan el editor sin querer)
+            while (*pp) { ItemKeyHandler *h = pp->get(); if (ScriptHas(h->keyScript.get(), "options_controls_new_pc")) *pp = h->next; else pp = &h->next; }
+            for (int i = 0; i < m->itemCount; ++i) for (GenericEventHandler *h = m->items[i]->onEvent.get(); h; h = h->next.get())
+                for (GenericEventScript *sc = h->eventScript.get(); sc; sc = sc->next.get())
+                    if (sc->action && strstr(sc->action.get(), "options_controls_new_pc")) { sc->action = (const char *)Ptr32_ArenaStrdup("exec \"h23_customize\" ;"); ++n; }
+        }
+        fprintf(stderr, "[H10] pestana CONTROLS -> Customize HUD (h23_customize): %d acciones\n", n);
+        return;
+    }
     int keys = 0, tabs = 0, frames = 0;
     for (int k = 0; k < s_dc->menuCount; ++k) {
         menuDef_t *m = s_dc->Menus[k]; const char *n = m->window.name ? m->window.name.get() : "";
