@@ -143,11 +143,78 @@ static unsigned H5P_NextPrimary(const playerState_s *ps, unsigned from)
     return 0;
 }
 
+// OLA U2c: cruceta (+actionslot N) como CG_ActionSlotDown_f (cgame/cg_weapons.cpp) en zombies: el bit 45+N-1 del usercmd mientras se
+// mantiene (PlayerCmd_actionSlot*ButtonPressed, g_client_script_cmd_mp.cpp) y, al pulsar, la accion de ps.actionSlotType[N-1]:
+//   SPECIFYWEAPON: sacar el arma del slot (casco equip_gasmask_zm / hacker de Moon en el 1, claymore/betty/spikemore en el 4); si ya
+//     esta en la mano, volver a la ultima primaria (weaponLatestPrimaryIdx) o a la siguiente (CycleWeapPrimary). Equipo sin municion
+//     ni detonador: nada (el original solo muestra la pista "sin municion").
+//   ALTWEAPONTOGGLE (slot 3 de _loadout): modo alterno del arma (lanzagranadas acoplado), como ToggleWeaponAltMode.
+//   NIGHTVISION: bit 18 del usercmd.
+// Puertas de ActionSlotUsageAllowed (rama zombies) y de CG_ActionSlotDown_f (weapFlags 0x80, eFlags2 0x10000000, 250 ms entre usos).
+static unsigned s_lastPrimary;
+static int s_lastSlotTime = -100000;
+unsigned H5P_ActionSlotWeapon(const playerState_s *ps, int slot)   // arma que muestra/saca el slot (0 si no hay accion de arma)
+{
+    if (slot < 0 || slot > 3) return 0;
+    if (ps->actionSlotType[slot] == ACTIONSLOTTYPE_SPECIFYWEAPON) { const unsigned w = ps->actionSlotParam[slot].specifyWeapon.index; return w && BG_PlayerHasWeapon(ps, w) ? w : 0; }
+    if (ps->actionSlotType[slot] == ACTIONSLOTTYPE_ALTWEAPONTOGGLE && ps->weapon) {
+        const unsigned alt = BG_GetWeaponVariantDef(ps->weapon)->altWeaponIndex; return alt && BG_PlayerHasWeapon(ps, alt) ? alt : 0; }
+    return 0;
+}
+static bool H5P_SlotAllowed(const playerState_s *ps)
+{
+    if (ps->weaponstate == WEAPON_DROPPING || ps->weaponstate == WEAPON_DROPPING_QUICK || ps->weaponstate == WEAPON_DROPPING_ALTSWITCH) return false;
+    if ((ps->pm_flags & 0xC00) || ps->weaponstate == WEAPON_DEPLOYING || (ps->eFlags2 & 0x40000000)) return false;
+    if ((ps->pm_flags & 0x400000) || ps->pm_type >= 9 || (ps->weapFlags & 0x200) || ps->pm_type == 6 || ps->pm_type == 7) return false;
+    return true;
+}
+static void H5P_ActionSlot(const playerState_s *ps, int slot, usercmd_s *cmd)
+{
+    if (!H5P_SlotAllowed(ps) || level.time - s_lastSlotTime < 250) return;
+    if ((ps->weapFlags & 0x80) || (ps->eFlags2 & 0x10000000)) return;
+    bool did = false;
+    const unsigned cur = s_pendingWeapon ? s_pendingWeapon : ps->weapon;
+    switch (ps->actionSlotType[slot])
+    {
+    case ACTIONSLOTTYPE_SPECIFYWEAPON: {
+        const unsigned w = ps->actionSlotParam[slot].specifyWeapon.index;
+        if (!w) break;
+        if (w == cur) {   // ya en la mano: volver a la primaria
+            unsigned back = s_lastPrimary && s_lastPrimary != w && BG_PlayerHasWeapon(ps, s_lastPrimary) ? s_lastPrimary : H5P_NextPrimary(ps, w);
+            if (back) { s_pendingWeapon = back; did = true; }
+        } else if (BG_PlayerHasWeapon(ps, w) && ps->weapon != w) {
+            const WeaponDef *d = BG_GetWeaponDef(w);
+            const bool empty = !BG_GetAmmoInClip(ps, w) && !BG_GetAmmoNotInClip(ps, w) && !d->unlimitedAmmo;
+            if (d->offhandSlot == OFFHAND_SLOT_EQUIPMENT && empty && !d->hasDetonator) fprintf(stderr, "[H5F] t=%d cruceta %d: %s sin municion\n", level.time, slot + 1, BG_WeaponName(w));
+            else { s_pendingWeapon = w; did = true; }
+        }
+    } break;
+    case ACTIONSLOTTYPE_ALTWEAPONTOGGLE: {
+        if (ps->weaponstate == WEAPON_MELEE_INIT || ps->weaponstate == WEAPON_MELEE_FIRE || ps->weaponstate == WEAPON_MELEE_END) break;
+        if (ps->weaponstate >= 2 && ps->weaponstate <= 5) break;
+        const unsigned alt = cur ? BG_GetWeaponVariantDef(cur)->altWeaponIndex : 0;
+        if (alt && BG_PlayerHasWeapon(ps, alt)) {
+            const WeaponDef *d = BG_GetWeaponDef(alt);
+            const bool empty = !BG_GetAmmoInClip(ps, alt) && !BG_GetAmmoNotInClip(ps, alt) && !d->unlimitedAmmo;
+            if (!(empty && d->inventoryType == WEAPINVENTORY_ALTMODE)) { s_pendingWeapon = alt; did = true; }
+        }
+    } break;
+    case ACTIONSLOTTYPE_NIGHTVISION: cmd->button_bits.setBit(18); did = true; break;
+    default: break;
+    }
+    if (did) s_lastSlotTime = level.time;
+    fprintf(stderr, "[H5F] t=%d cruceta %d (tipo %d) -> %s\n", level.time, slot + 1, (int)ps->actionSlotType[slot],
+        did ? (s_pendingWeapon ? BG_WeaponName(s_pendingWeapon) : "accion") : "nada");
+}
+
 static void H5P_CmdButtons(client_t *bot, usercmd_s *cmd)
 {
     gentity_s *pl = bot->gentity;
     const playerState_s *ps = &pl->client->ps;
     const unsigned held = s_pin.buttons | s_latched;
+    if (ps->weapon && BG_GetWeaponDef(ps->weapon)->inventoryType == WEAPINVENTORY_PRIMARY) s_lastPrimary = ps->weapon;
+    for (int k = 0; k < 4; ++k) if (held & (H5IN_SLOT1 << k)) cmd->button_bits.setBit(45u + k);   // actionslotXbuttonpressed
+    for (int k = 0; k < 4; ++k) if (s_latched & (H5IN_SLOT1 << k)) H5P_ActionSlot(ps, k, cmd);       // flanco de pulsacion
     const unsigned list[] = { H5IN_FIRE, H5IN_ADS, H5IN_RELOAD, H5IN_MELEE, H5IN_USE, H5IN_FRAG, H5IN_SMOKE };
     for (unsigned b : list) if (held & b) cmd->button_bits.setBit((unsigned)H5P_UsercmdBit(b));
     { extern int g_h5eUseUntil, g_h5eFireUntil; if (level.time < g_h5eUseUntil) cmd->button_bits.setBit((unsigned)H5P_UsercmdBit(H5IN_USE));   // OLA M1: H5_TIMED

@@ -18,6 +18,13 @@ enum : unsigned
     H5IN_NEXTWEAPON = 1u << 9,// weapnext       -> usercmd.weapon = siguiente primaria que lleva (CycleWeapPrimary)
     H5IN_FRAG = 1u << 10,     // +frag          -> bit 14 (granada letal)
     H5IN_SMOKE = 1u << 11,    // +smoke         -> bit 15 (granada tactica / mono en zombies)
+    // OLA U2c: cruceta (+actionslot 1..4). Bits 45..48 del usercmd mientras se mantiene (actionslotXbuttonpressed del GSC) y, al
+    // pulsar, la accion del slot del playerState como CG_ActionSlotDown_f (cgame/cg_weapons.cpp): arma (casco de Moon, hacker,
+    // trampas de Ascension/Five...), modo alterno del arma o vision nocturna. Ver H5P_ActionSlot en h5_play.cpp.
+    H5IN_SLOT1 = 1u << 12,    // +actionslot 1  (cruceta arriba)
+    H5IN_SLOT2 = 1u << 13,    // +actionslot 2  (cruceta abajo)
+    H5IN_SLOT3 = 1u << 14,    // +actionslot 3  (cruceta izquierda)
+    H5IN_SLOT4 = 1u << 15,    // +actionslot 4  (cruceta derecha)
 };
 struct H5PlayerInput
 {

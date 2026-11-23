@@ -23,6 +23,8 @@
 #include <bgame/bg_weapons_def.h>
 #include <bgame/bg_weapons_ammo.h>
 #include <bgame/bg_mantle.h>
+#include <bgame/bg_misc.h>
+#include <clientscript/cscr_stringlist.h>
 #include <qcommon/cm_trace.h>
 #include <qcommon/cmd.h>
 #include <universal/com_math.h>
@@ -54,21 +56,26 @@ void H10_Close();
 bool H10_Open(const char *menu);
 
 void H23_AimAssist();
+unsigned H5P_ActionSlotWeapon(const playerState_s *ps, int slot);   // h5_play.cpp (OLA U2c)
 namespace {
-enum Ctl { C_STICK, C_FIRE, C_ADS, C_MELEE, C_JUMP, C_STANCE, C_WEAPON, C_FRAG, C_TACT, C_USE, C_PAUSE, C_COUNT };
-const char *const kName[C_COUNT] = { "stick", "fire", "ads", "melee", "jump", "stance", "weapon", "frag", "tactical", "use", "pause" };
-const char *const kLabel[C_COUNT] = { "MOVE", "FIRE", "AIM", "KNIFE", "JUMP", "STANCE", "WEAPON", "LETHAL", "TACTICAL", "USE", "PAUSE" };
+enum Ctl { C_STICK, C_FIRE, C_ADS, C_MELEE, C_JUMP, C_STANCE, C_WEAPON, C_FRAG, C_TACT, C_USE, C_PAUSE, C_SLOT1, C_SLOT2, C_SLOT3, C_SLOT4, C_COUNT };
+const char *const kName[C_COUNT] = { "stick", "fire", "ads", "melee", "jump", "stance", "weapon", "frag", "tactical", "use", "pause", "slot1", "slot2", "slot3", "slot4" };
+const char *const kLabel[C_COUNT] = { "MOVE", "FIRE", "AIM", "KNIFE", "JUMP", "STANCE", "WEAPON", "LETHAL", "TACTICAL", "USE", "PAUSE", "D-PAD UP", "D-PAD DOWN", "D-PAD LEFT", "D-PAD RIGHT" };
 struct Place { float fx, fy, s; };   // centro en fraccion de la zona segura, tamano (radio; recuadro: medio alto) en fraccion del lado corto
 // PLEGADO: como las capturas de la APK movil (pausa+puntos arriba-izq, postura a la izquierda, arma+municion arriba-dcha, granada con
 // numero a la derecha, mira circular abajo-dcha, cuchillo abajo-centro). DESPLEGADO: lo mismo en las esquinas y el centro libre para mirar.
 const Place kDefFold[C_COUNT] = {
     { 0.14f, 0.70f, 0.130f }, { 0.915f, 0.72f, 0.105f }, { 0.770f, 0.86f, 0.068f }, { 0.50f, 0.90f, 0.070f }, { 0.965f, 0.95f, 0.050f },
     { 0.045f, 0.33f, 0.070f }, { 0.880f, 0.085f, 0.060f }, { 0.955f, 0.38f, 0.058f }, { 0.865f, 0.38f, 0.058f }, { 0.690f, 0.58f, 0.075f },
-    { 0.030f, 0.075f, 0.045f } };
+    { 0.030f, 0.075f, 0.045f },
+    // OLA U2c: cruceta (actionslot 1-4) en cruz a la izquierda, entre la postura y el stick (el pulgar izquierdo, como en el mando);
+    // solo salen los slots con accion (casco, minas...)
+    { 0.160f, 0.260f, 0.042f }, { 0.160f, 0.460f, 0.042f }, { 0.110f, 0.360f, 0.042f }, { 0.210f, 0.360f, 0.042f } };
 const Place kDefOpen[C_COUNT] = {
     { 0.13f, 0.76f, 0.105f }, { 0.920f, 0.80f, 0.085f }, { 0.800f, 0.89f, 0.055f }, { 0.785f, 0.73f, 0.050f }, { 0.965f, 0.62f, 0.045f },
     { 0.040f, 0.56f, 0.052f }, { 0.885f, 0.055f, 0.048f }, { 0.960f, 0.18f, 0.046f }, { 0.885f, 0.18f, 0.046f }, { 0.700f, 0.62f, 0.060f },
-    { 0.025f, 0.045f, 0.036f } };
+    { 0.025f, 0.045f, 0.036f },
+    { 0.120f, 0.295f, 0.036f }, { 0.120f, 0.425f, 0.036f }, { 0.080f, 0.360f, 0.036f }, { 0.160f, 0.360f, 0.036f } };
 Place s_lay[2][C_COUNT];
 bool s_autoAim, s_loaded;
 int s_winW = 1, s_winH = 1;
@@ -132,7 +139,8 @@ bool Hit(int c, float x, float y, float slop)
 bool OnScore(float x, float y) { float cx, cy, r; Center(C_PAUSE, &cx, &cy, &r); return x > cx + r * 1.1f; }
 
 // ---- estado del jugador para el HUD tactil
-struct PState { bool ok = false; int score = 0, weapon = 0, clip = 0, stock = 0, frag = 0, fragN = 0, tact = 0, tactN = 0, stance = 0; bool hint = false, dead = false; };
+struct PState { bool ok = false; int score = 0, weapon = 0, clip = 0, stock = 0, frag = 0, fragN = 0, tact = 0, tactN = 0, stance = 0; bool hint = false, dead = false;
+    int slotType[4] = {}, slotW[4] = {}, slotN[4] = {}; bool slotEmpty[4] = {}; };   // cruceta: tipo, arma, municion, equipo agotado
 PState Read()
 {
     PState s; gentity_s *pl = &g_entities[0]; if (!pl->r.inuse || !pl->client) return s;
@@ -147,6 +155,11 @@ PState Read()
         if (d->offhandClass == OFFHAND_CLASS_FRAG_GRENADE && !s.frag) { s.frag = w; s.fragN = n; }
         else if ((d->offhandClass == OFFHAND_CLASS_SMOKE_GRENADE || d->offhandClass == OFFHAND_CLASS_FLASH_GRENADE) && !s.tact) { s.tact = w; s.tactN = n; }
     }
+    for (int k = 0; k < 4; ++k) {   // como CG_ActionSlotIsUsable / CG_DrawPlayerActionSlotDpad (cgame/cg_ammocounter.cpp)
+        s.slotType[k] = ps->actionSlotType[k]; s.slotW[k] = (int)H5P_ActionSlotWeapon(ps, k);
+        if (const int w = s.slotW[k]) { const WeaponDef *d = BG_GetWeaponDef(w); s.slotN[k] = BG_WeaponAmmo(ps, w);
+            s.slotEmpty[k] = d && d->offhandSlot == OFFHAND_SLOT_EQUIPMENT && !BG_GetAmmoInClip(ps, w) && !BG_GetAmmoNotInClip(ps, w) && !d->unlimitedAmmo; }
+    }
     return s;
 }
 PState s_ps;
@@ -156,6 +169,7 @@ bool Visible(int c, bool edit)
     if (c == C_USE) return s_ps.hint;
     if (c == C_FRAG) return s_ps.frag != 0;
     if (c == C_TACT) return s_ps.tact != 0;
+    if (c >= C_SLOT1 && c <= C_SLOT4) { const int k = c - C_SLOT1; return s_ps.slotW[k] != 0 || s_ps.slotType[k] == ACTIONSLOTTYPE_NIGHTVISION; }   // solo con accion
     return true;
 }
 
@@ -228,7 +242,7 @@ void TouchGame(int id, int phase, float x, float y)
     if (phase == 0) {
         t = Ptr(); t.on = true; t.x0 = t.x = t.lx = x; t.y0 = t.y = t.ly = y;
         const float sl = Slop();
-        static const int order[] = { C_PAUSE, C_WEAPON, C_USE, C_FRAG, C_TACT, C_ADS, C_MELEE, C_JUMP, C_STANCE, C_FIRE };
+        static const int order[] = { C_PAUSE, C_WEAPON, C_SLOT1, C_SLOT2, C_SLOT3, C_SLOT4, C_USE, C_FRAG, C_TACT, C_ADS, C_MELEE, C_JUMP, C_STANCE, C_FIRE };
         for (int c : order) if (Visible(c, false) && Hit(c, x, y, sl)) {
             t.role = c;
             if (c == C_ADS) { s_ads = !s_ads; fprintf(stderr, "[H23] mira %s\n", s_ads ? "ACTIVADA" : "quitada"); if (s_ads) H23_AimAssist(); }
@@ -344,6 +358,21 @@ void Button(int c, bool on, bool edit)
         char b[8]; snprintf(b, sizeof b, "%d", edit && !w ? 0 : n); Text(s_big, b, cx - r * 0.95f, cy - r * 0.55f, r * 0.8f, 1, kWhite);
     } break;
     case C_USE: { const float g[4] = { 1, 0.85f, 0.3f, 0.95f }; Text(s_big, "USE", cx, cy + r * 0.25f, r * 0.75f, 1, g); } break;
+    case C_SLOT1: case C_SLOT2: case C_SLOT3: case C_SLOT4: {
+        // icono de la cruceta del original (WeaponVariantDef.dpadIcon: casco, hacker, claymore...) y municion si iStartAmmo > 1
+        const int k = c - C_SLOT1, w = s_ps.slotW[k];
+        const WeaponVariantDef *v = w ? BG_GetWeaponVariantDef(w) : nullptr; const WeaponDef *d = w ? BG_GetWeaponDef(w) : nullptr;
+        Material *m = v && v->dpadIcon ? v->dpadIcon.get() : (d && d->hudIcon ? d->hudIcon.get() : nullptr);
+        const float a[4] = { 1, 1, 1, s_ps.slotEmpty[k] ? 0.45f : 0.92f };
+        if (m) { const float ratio = v && v->dpadIconRatio == WEAPON_ICON_RATIO_4TO1 ? 4.0f : v && v->dpadIconRatio == WEAPON_ICON_RATIO_2TO1 ? 2.0f : 1.0f;
+            const float iw = ratio > 1 ? ic * 1.3f : ic, ih = iw / ratio; Icon(m, cx, cy, iw, ih, a); }
+        else Text(s_font, s_ps.slotType[k] == ACTIONSLOTTYPE_NIGHTVISION ? "NV" : edit ? "D" : "?", cx, cy + r * 0.2f, r * 0.55f, 1, a);
+        // flecha de la direccion de la cruceta, fuera del circulo
+        const float dx = k == 2 ? -1.f : k == 3 ? 1.f : 0.f, dy = k == 0 ? -1.f : k == 1 ? 1.f : 0.f, t = r * 1.18f, q = r * 0.2f;
+        const float tx = cx + dx * t, ty = cy + dy * t, bx = cx + dx * (t - q * 1.2f), by = cy + dy * (t - q * 1.2f);
+        Tri(tx, ty, bx - dy * q, by + dx * q, bx + dy * q, by - dx * q, kEdge);
+        if (d && d->iStartAmmo > 1 && w) { char b[8]; snprintf(b, sizeof b, "%d", s_ps.slotN[k]); Text(s_font, b, cx + r * 0.95f, cy + r * 0.95f, r * 0.6f, 1, kWhite); }
+    } break;
     }
     if (edit) Text(s_font, kLabel[c], cx, cy + r + r * 0.5f, fmaxf(r * 0.4f, 0.02f * Short()), 1, kWhite);
 }
@@ -428,6 +457,7 @@ unsigned H23_Fill(H5PlayerInput *in, float dt)
     if (Held(C_USE) && s_ps.hint) in->buttons |= H5IN_USE;
     if (Held(C_FRAG)) in->buttons |= H5IN_FRAG;
     if (Held(C_TACT)) in->buttons |= H5IN_SMOKE;
+    for (int k = 0; k < 4; ++k) if (Held(C_SLOT1 + k) && Visible(C_SLOT1 + k, false)) in->buttons |= H5IN_SLOT1 << k;   // OLA U2c: cruceta
     if (s_reloadPulse) { in->buttons |= H5IN_RELOAD; s_reloadPulse = false; }
     if (s_swapPulse) { in->buttons |= H5IN_NEXTWEAPON; s_swapPulse = false; }
     for (auto &p : s_p) if (p.on && p.role == C_PAUSE && OnScore(p.x0, p.y0)) f |= H23F_SCORES;
@@ -495,7 +525,12 @@ void PilotStep()
         else if (sscanf(a.c_str(), "shot %63s", w) == 1) { if (H4_Shot) H4_Shot((std::string("_h23_") + w).c_str()); }
         else if (!strncmp(a.c_str(), "cmd ", 4)) { Cbuf_AddText(0, (a.substr(4) + "\n").c_str()); }
         else if (a == "edit") Cmd_H23Customize();
-        else if (a == "log") { PState s = Read(); fprintf(stderr, "[H23] estado: puntos %d arma %d %d/%d letal %d x%d tactica %d x%d pista %d mira %d editar %d perfil %s\n", s.score, s.weapon, s.clip, s.stock, s.frag, s.fragN, s.tact, s.tactN, s.hint, s_ads, s_edit, ProfName(Prof())); }
+        else if (a == "log") { PState s = Read(); fprintf(stderr, "[H23] estado: puntos %d arma %d %d/%d letal %d x%d tactica %d x%d pista %d mira %d editar %d perfil %s\n", s.score, s.weapon, s.clip, s.stock, s.frag, s.fragN, s.tact, s.tactN, s.hint, s_ads, s_edit, ProfName(Prof()));
+            fprintf(stderr, "[H23] estado: arma %s tactica %s | cruceta", s.weapon ? BG_WeaponName(s.weapon) : "-", s.tact ? BG_WeaponName(s.tact) : "-");   // OLA U2c
+            for (int k = 0; k < 4; ++k) fprintf(stderr, " %d:%s(t%d,n%d)%s", k + 1, s.slotW[k] ? BG_WeaponName(s.slotW[k]) : "-", s.slotType[k], s.slotN[k], Visible(C_SLOT1 + k, false) ? "" : " oculto");
+            { gentity_s *pl = &g_entities[0]; const int he = pl->client && s.hint ? pl->client->ps.cursorHintEntIndex : 1023; gentity_s *h = he > 0 && he < 1023 ? &g_entities[he] : nullptr;
+              fprintf(stderr, " | pista ent %d %s %s", he, h && h->classname ? SL_ConvertToString(h->classname, SCRIPTINSTANCE_SERVER) : "-", h && h->targetname ? SL_ConvertToString(h->targetname, SCRIPTINSTANCE_SERVER) : "-"); }
+            fprintf(stderr, "\n"); }
     }
 }
 void MacProvider(H5PlayerInput *in, float dt)
