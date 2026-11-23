@@ -75,7 +75,7 @@ const Place kDefOpen[C_COUNT] = {
     { 0.13f, 0.76f, 0.105f }, { 0.920f, 0.80f, 0.085f }, { 0.800f, 0.89f, 0.055f }, { 0.785f, 0.73f, 0.050f }, { 0.965f, 0.62f, 0.045f },
     { 0.040f, 0.56f, 0.052f }, { 0.885f, 0.055f, 0.048f }, { 0.960f, 0.18f, 0.046f }, { 0.885f, 0.18f, 0.046f }, { 0.700f, 0.62f, 0.060f },
     { 0.025f, 0.045f, 0.036f },
-    { 0.120f, 0.295f, 0.036f }, { 0.120f, 0.425f, 0.036f }, { 0.080f, 0.360f, 0.036f }, { 0.160f, 0.360f, 0.036f } };
+    { 0.120f, 0.275f, 0.036f }, { 0.120f, 0.445f, 0.036f }, { 0.070f, 0.360f, 0.036f }, { 0.170f, 0.360f, 0.036f } };
 Place s_lay[2][C_COUNT];
 bool s_autoAim, s_loaded;
 int s_winW = 1, s_winH = 1;
@@ -366,7 +366,8 @@ void Button(int c, bool on, bool edit)
         const float a[4] = { 1, 1, 1, s_ps.slotEmpty[k] ? 0.45f : 0.92f };
         if (m) { const float ratio = v && v->dpadIconRatio == WEAPON_ICON_RATIO_4TO1 ? 4.0f : v && v->dpadIconRatio == WEAPON_ICON_RATIO_2TO1 ? 2.0f : 1.0f;
             const float iw = ratio > 1 ? ic * 1.3f : ic, ih = iw / ratio; Icon(m, cx, cy, iw, ih, a); }
-        else Text(s_font, s_ps.slotType[k] == ACTIONSLOTTYPE_NIGHTVISION ? "NV" : edit ? "D" : "?", cx, cy + r * 0.2f, r * 0.55f, 1, a);
+        else { static const char *const dir[4] = { "UP", "DOWN", "LEFT", "RIGHT" };   // en el editor, sin accion: la direccion dentro
+            Text(s_font, s_ps.slotType[k] == ACTIONSLOTTYPE_NIGHTVISION ? "NV" : edit ? dir[k] : "?", cx, cy + r * 0.2f, r * (edit && k >= 2 ? 0.42f : 0.5f), 1, a); }
         // flecha de la direccion de la cruceta, fuera del circulo
         const float dx = k == 2 ? -1.f : k == 3 ? 1.f : 0.f, dy = k == 0 ? -1.f : k == 1 ? 1.f : 0.f, t = r * 1.18f, q = r * 0.2f;
         const float tx = cx + dx * t, ty = cy + dy * t, bx = cx + dx * (t - q * 1.2f), by = cy + dy * (t - q * 1.2f);
@@ -374,7 +375,7 @@ void Button(int c, bool on, bool edit)
         if (d && d->iStartAmmo > 1 && w) { char b[8]; snprintf(b, sizeof b, "%d", s_ps.slotN[k]); Text(s_font, b, cx + r * 0.95f, cy + r * 0.95f, r * 0.6f, 1, kWhite); }
     } break;
     }
-    if (edit) Text(s_font, kLabel[c], cx, cy + r + r * 0.5f, fmaxf(r * 0.4f, 0.02f * Short()), 1, kWhite);
+    if (edit && !(c >= C_SLOT1 && c <= C_SLOT4)) Text(s_font, kLabel[c], cx, cy + r + r * 0.5f, fmaxf(r * 0.4f, 0.02f * Short()), 1, kWhite);   // la cruceta lleva su flecha
 }
 bool Held(int c) { for (auto &p : s_p) if (p.on && p.role == c) return true; return false; }
 
