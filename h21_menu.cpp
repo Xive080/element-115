@@ -41,6 +41,13 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <sys/stat.h>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <chrono>
+#include "h22_codec.h"
+#pragma weak h22c_open   // sin libvpx (build sin el codec) el avance en video simplemente no existe
+const char *H18_VideoFor(const char *zone);   // h18_maps.cpp
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #include <crt_externs.h>
@@ -177,7 +184,7 @@ void LoadDescriptions()
 
 // ---------------------------------------------------------------- estado del menu
 enum Screen { SETUP, MISSION };
-enum Item { IT_NONE = -1, IT_NAME = 0, IT_SOLO, IT_COOP, IT_HIGH, IT_LOW, IT_CHOOSE, IT_MAP0 = 100, IT_HELL = 200, IT_BACK, IT_START };
+enum Item { IT_NONE = -1, IT_NAME = 0, IT_SOLO, IT_COOP, IT_HIGH, IT_LOW, IT_CHOOSE, IT_MAP0 = 100, IT_HELL = 200, IT_BACK, IT_START, IT_VIEW };
 Screen s_scr = SETUP;
 std::string s_name = "Player";
 bool s_coop = false; int s_quality = 2, s_quality0 = 2; int s_map = 0;
@@ -185,6 +192,15 @@ int s_focus = IT_SOLO; bool s_editName = false, s_nameFresh = false;   // fresh:
 int s_W, s_H; float s_safe[4];
 double s_t0;
 bool s_launch; int s_launchMap = -1;
+// Vista de MISSION SELECT: 0 = portadas horizontales (carrusel que se arrastra), 1 = lista con ficha (la del original). Por defecto portadas en
+// Android y lista en el Mac; el usuario la cambia con el boton de arriba a la derecha y se recuerda en bo1_menu.txt (view=covers|list).
+#ifdef __ANDROID__
+int s_view = 0;
+#else
+int s_view = 1;
+#endif
+float s_scroll = 0, s_minS = 0, s_maxS = 0, s_dragX0 = 0, s_dragS0 = 0, s_railY0 = 0, s_railY1 = 0;
+bool s_follow = true, s_snap = true, s_dragging = false, s_dragCand = false, s_ptrDown = false;
 std::string s_notice; double s_noticeT;
 
 std::string PlayersDir() { const char *b = H18_BaseDir(); return std::string(b && *b ? b : (getenv("P3_GAMEDATA") ? getenv("P3_GAMEDATA") : "../../gamedata")) + "/players"; }
@@ -198,6 +214,7 @@ void LoadPrefs()
         char *nl = strpbrk(line, "\r\n"); if (nl) *nl = 0;
         if (!strncmp(line, "name=", 5)) { std::string n; for (const char *c = line + 5; *c && n.size() < 16; ++c) if (NameChar((unsigned char)*c)) n += *c; if (!n.empty()) s_name = n; }
         else if (!strncmp(line, "mode=", 5)) s_coop = !strcmp(line + 5, "coop") && CoopAvailable();
+        else if (!strncmp(line, "view=", 5)) s_view = !strcmp(line + 5, "list") ? 1 : 0;
         else if (!strncmp(line, "map=", 4)) { for (int i = 0; i < kNumMaps; ++i) if (!strcmp(kMaps[i].zone, line + 4)) s_map = i; }
     }
     fclose(f);
@@ -206,7 +223,7 @@ void SavePrefs()
 {
     mkdir(PlayersDir().c_str(), 0755);
     const std::string p = MenuFile(), t = p + ".tmp";
-    if (FILE *f = fopen(t.c_str(), "w")) { fprintf(f, "name=%s\nmode=%s\nmap=%s\n", s_name.c_str(), s_coop ? "coop" : "solo", kMaps[s_map].zone); fclose(f); rename(t.c_str(), p.c_str()); }
+    if (FILE *f = fopen(t.c_str(), "w")) { fprintf(f, "name=%s\nmode=%s\nmap=%s\nview=%s\n", s_name.c_str(), s_coop ? "coop" : "solo", kMaps[s_map].zone, s_view ? "list" : "covers"); fclose(f); rename(t.c_str(), p.c_str()); }
 }
 
 // ---------------------------------------------------------------- dibujo
@@ -312,7 +329,26 @@ void DrawSetup()
     float by = ty + 28 * u; for (const std::string &l : Wrap(s_fNormal, body, 22 * u, maxW)) { TextC(s_fNormal, l.c_str(), cx, by, 22 * u, kHint); by += 25 * u; }
 }
 
-void DrawMission()
+void DrawBottom(float lx, float rx1, float by, float rowH)
+{
+    const float u = U();
+   // BACK, resumen de lo elegido y START (OLA U2: boton grande para el dedo; el doble toque y Enter siguen valiendo)
+        const float bw = fmaxf(110 * u, rowH * 1.6f); bool focus = s_focus == IT_BACK;
+        Rect(lx, by, bw, rowH, focus ? kWhite : kBar);
+        const float tp = fminf(rowH * 0.66f, 27 * u); TextC(s_fNormal, "BACK", lx + bw * 0.5f, by + rowH * 0.5f + tp * 0.36f, tp, focus ? kBlack : kWhite);
+        AddHit(IT_BACK, lx, by, bw, rowH);
+        const float sw = fmaxf(200 * u, rowH * 2.6f), sx = rx1 - sw; focus = s_focus == IT_START;
+        const bool ok = s_mapOk[s_map];
+        const float dis[4] = { 0.30f, 0.30f, 0.30f, 0.9f };
+        Rect(sx, by, sw, rowH, !ok ? dis : focus ? kRedHi : kRed); if (focus) Frame(sx - 2, by - 1, sw + 4, rowH + 2, 2, kWhite);
+        TextC(s_fNormal, "START", sx + sw * 0.5f, by + rowH * 0.5f + tp * 0.36f, tp, ok ? kWhite : kGrey);
+        AddHit(IT_START, sx, by, sw, rowH);
+        char sum[96]; snprintf(sum, sizeof sum, "%s / %s GRAPHICS", s_coop ? "MULTIPLAYER (LOCAL CO-OP)" : "SINGLE PLAYER", s_quality == 0 ? "LOW" : s_quality == 2 ? "HIGH" : "CUSTOM");
+        const float sp = FitPx(s_fSmall, sum, 17 * u, sx - (lx + bw + 16 * u) - 12 * u);
+        Text(s_fSmall, sum, lx + bw + 16 * u, by + rowH * 0.5f + sp * 0.36f, sp, kWhite);
+}
+
+void DrawMissionList()
 {
     const float u = U(), L = s_safe[0], T = s_safe[1], SW = s_W - s_safe[0] - s_safe[2], SH = s_H - s_safe[1] - s_safe[3];
     // una columna (como el original) si las 10 filas + HELL + BACK caben con el alto tactil minimo; si no (pantalla baja: Fold plegado en
@@ -372,21 +408,156 @@ void DrawMission()
         float by = imgTop + side + 24 * u;
         for (const std::string &l : lines) { TextC(s_fNormal, l.c_str(), cx, by, 18 * u, kHint); by += 21 * u; }
     }
-    {   // BACK, resumen de lo elegido y START (OLA U2: boton grande para el dedo; el doble toque y Enter siguen valiendo)
-        const float by = py0 + ph + 14 * u, bw = fmaxf(110 * u, rowH * 1.6f); bool focus = s_focus == IT_BACK;
-        Rect(lx, by, bw, rowH, focus ? kWhite : kBar);
-        const float tp = fminf(rowH * 0.66f, 27 * u); TextC(s_fNormal, "BACK", lx + bw * 0.5f, by + rowH * 0.5f + tp * 0.36f, tp, focus ? kBlack : kWhite);
-        AddHit(IT_BACK, lx, by, bw, rowH);
-        const float sw = fmaxf(200 * u, rowH * 2.6f), sx = rx1 - sw; focus = s_focus == IT_START;
-        const bool ok = s_mapOk[s_map];
-        const float dis[4] = { 0.30f, 0.30f, 0.30f, 0.9f };
-        Rect(sx, by, sw, rowH, !ok ? dis : focus ? kRedHi : kRed); if (focus) Frame(sx - 2, by - 1, sw + 4, rowH + 2, 2, kWhite);
-        TextC(s_fNormal, "START", sx + sw * 0.5f, by + rowH * 0.5f + tp * 0.36f, tp, ok ? kWhite : kGrey);
-        AddHit(IT_START, sx, by, sw, rowH);
-        char sum[96]; snprintf(sum, sizeof sum, "%s / %s GRAPHICS", s_coop ? "MULTIPLAYER (LOCAL CO-OP)" : "SINGLE PLAYER", s_quality == 0 ? "LOW" : s_quality == 2 ? "HIGH" : "CUSTOM");
-        const float sp = FitPx(s_fSmall, sum, 17 * u, sx - (lx + bw + 16 * u) - 12 * u);
-        Text(s_fSmall, sum, lx + bw + 16 * u, by + rowH * 0.5f + sp * 0.36f, sp, kWhite);
+    DrawBottom(lx, rx1, py0 + ph + 14 * u, rowH);
+}
+
+
+// ---- vista de portadas: carrusel horizontal (portadas 16:9 grandes, la elegida mas ancha); se arrastra con el dedo, un toque elige, otro entra
+
+// ---- avance en video de la portada elegida (OLA U2d): tras ~1,5 s sin tocar nada, la portada pasa a ser el video de carga del mapa, mudo y en bucle.
+// El video lo decodifica un hilo (h22_codec: VP9 por software) a su ritmo; el dibujo copia la ultima imagen a una textura dinamica del motor.
+// Sin libvpx (h22c_open devuelve nullptr o ni existe) o sin fichero de video, la portada se queda en su imagen.
+struct Preview {
+    std::thread th; std::atomic<bool> stop{ false }; std::mutex m; std::vector<uint8_t> buf; int w = 0, h = 0; bool fresh = false; int map = -1;
+    IDirect3DTexture9 *tex = nullptr; Material *mat = nullptr; int tw = 0, th2 = 0, failMap = -1; bool shown = false;
+};
+Preview s_pv;
+void PreviewMain(std::string path)
+{
+    using Clk = std::chrono::steady_clock;
+    while (!s_pv.stop) {
+        char why[160] = ""; H22Info in{}; H22Clip *c = (&h22c_open ? h22c_open(path.c_str(), &in, why, sizeof why) : nullptr);
+        if (!c) { fprintf(stderr, "[H21] avance en video: %s\n", why); return; }
+        std::vector<uint8_t> f((size_t)in.w * in.h * 4); const auto t0 = Clk::now(); double pts = 0;
+        while (!s_pv.stop && h22c_video(c, f.data(), in.w * 4, &pts)) {
+            const double now = std::chrono::duration<double, std::milli>(Clk::now() - t0).count();
+            if (pts > now + 2) { std::this_thread::sleep_for(std::chrono::microseconds((long long)((pts - now) * 1000))); }
+            else if (pts < now - 80) continue;   // por detras: salta la imagen
+            std::lock_guard<std::mutex> lk(s_pv.m); s_pv.buf = f; s_pv.w = in.w; s_pv.h = in.h; s_pv.fresh = true;
+        }
+        h22c_close(c);
     }
+}
+void PreviewStop()
+{
+    if (s_pv.th.joinable()) { s_pv.stop = true; s_pv.th.join(); }
+    s_pv.stop = false; s_pv.map = -1; s_pv.shown = false; { std::lock_guard<std::mutex> lk(s_pv.m); s_pv.fresh = false; s_pv.buf.clear(); }
+}
+void PreviewStart(int map)
+{
+    PreviewStop();
+    if (!&h22c_open) return;
+    const char *vp = H18_VideoFor(kMaps[map].zone); if (!vp || !*vp) return;
+    s_pv.map = map; s_pv.th = std::thread(PreviewMain, std::string(vp));
+    fprintf(stderr, "[H21] avance en video de %s\n", kMaps[map].zone);
+}
+// copia la ultima imagen a la textura (se crea al tamano del video) y devuelve el material, o nullptr si aun no hay imagen
+Material *PreviewMat(float *iw, float *ih)
+{
+    if (s_pv.map < 0) return nullptr;
+    std::lock_guard<std::mutex> lk(s_pv.m);
+    if (s_pv.w <= 0 || s_pv.buf.size() < (size_t)s_pv.w * s_pv.h * 4) return nullptr;
+    if (!s_pv.tex || s_pv.tw != s_pv.w || s_pv.th2 != s_pv.h) {
+        IDirect3DTexture9 *t = nullptr;
+        if (!s_tmpl || !s_tmpl->textureTable || dx.device->CreateTexture(s_pv.w, s_pv.h, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &t, 0) != 0 || !t) { s_pv.failMap = s_pv.map; s_pv.map = -1; return nullptr; }
+        const GfxImage *tim = s_tmpl->textureTable.get()[0].u.image.get();
+        GfxImage *img = (GfxImage *)Ptr32_ArenaAlloc(sizeof(GfxImage), 8);
+        if (tim) { img->semantic = tim->semantic; img->track = tim->track; }
+        img->name = Ptr32_ArenaStrdup("h21_preview"); img->category = 3; img->mapType = 3; img->noPicmip = 1; img->width = (unsigned short)s_pv.w; img->height = (unsigned short)s_pv.h; img->depth = 1;
+        img->texture.basemap = t;
+        Material *m = (Material *)Ptr32_ArenaAlloc(sizeof(Material), 8); memcpy(m, s_tmpl, sizeof(Material));
+        MaterialTextureDef *td = (MaterialTextureDef *)Ptr32_ArenaAlloc(sizeof(MaterialTextureDef) * s_tmpl->textureCount, 4);
+        memcpy(td, s_tmpl->textureTable.get(), sizeof(MaterialTextureDef) * s_tmpl->textureCount); td[0].u.image = img; m->textureTable = td;
+        m->info.name = Ptr32_ArenaStrdup("h21_preview"); s_pv.tex = t; s_pv.mat = m; s_pv.tw = s_pv.w; s_pv.th2 = s_pv.h;   // la textura vieja (otro tamano) se deja: el arena no libera
+    }
+    if (s_pv.fresh) {
+        D3DLOCKED_RECT lr;
+        if (s_pv.tex->LockRect(0, &lr, nullptr, D3DLOCK_DISCARD) == 0) {
+            for (int y = 0; y < s_pv.h; ++y) memcpy((char *)lr.pBits + (size_t)y * lr.Pitch, s_pv.buf.data() + (size_t)y * s_pv.w * 4, (size_t)s_pv.w * 4);
+            s_pv.tex->UnlockRect(0); s_pv.shown = true;
+        }
+        s_pv.fresh = false;
+    }
+    if (!s_pv.shown) return nullptr;
+    *iw = (float)s_pv.w; *ih = (float)s_pv.h; return s_pv.mat;
+}
+
+float ClampScroll(float v) { return v < s_minS ? s_minS : v > s_maxS ? s_maxS : v; }
+void DrawMissionCovers()
+{
+    const float u = U(), L = s_safe[0], T = s_safe[1], SW = s_W - s_safe[0] - s_safe[2], SH = s_H - s_safe[1] - s_safe[3];
+    const float rowH = fminf(fmaxf(40 * u, RowMin()), 64 * u);
+    {   // fondo: la portada del mapa elegido a pantalla completa, oscurecida, con fundido de 0,35 s al cambiar de mapa
+        static int cur = -1, prev = -1; static double t0 = 0; const double now = NowMs();
+        if (cur != s_map) { prev = cur; cur = s_map; t0 = now; }
+        const float a = fminf(1.0f, (float)((now - t0) / 350.0));
+        const float full[4] = { 0.42f, 0.42f, 0.42f, 1 }, fade[4] = { 0.42f, 0.42f, 0.42f, a };
+        if (prev >= 0 && a < 1.0f && s_mapMat[prev]) PicCover(s_mapMat[prev], 0, 0, (float)s_W, (float)s_H, 1, 1, full);
+        if (s_mapMat[cur]) PicCover(s_mapMat[cur], 0, 0, (float)s_W, (float)s_H, 1, 1, a < 1.0f && prev >= 0 ? fade : full);
+        const float bot[4] = { 0, 0, 0, 0.55f }; Rect(0, (float)s_H * 0.62f, (float)s_W, (float)s_H * 0.38f, bot);   // legibilidad de la franja de texto y los botones
+    }
+    Text(s_fBig, "MISSION SELECT", L + 28 * u, T + 56 * u, 30 * u, kWhite);
+    const float railTop = T + 96 * u, infoH = 96 * u, bottomH = rowH + 22 * u;
+    const float hMax = SH - 96 * u - 28 * u - 10 * u - infoH - bottomH;
+    const float ws = fmaxf(120 * u, fminf(fminf(SW * 0.56f, hMax * 16.0f / 9.0f), 700 * u)), hs = ws * 9.0f / 16.0f;
+    const float wb = ws * 0.70f, hb = wb * 9.0f / 16.0f, gap = 14 * u, pad = 28 * u;
+    const float railH = hs + 28 * u, cy = railTop + railH * 0.5f;
+    s_railY0 = railTop; s_railY1 = railTop + railH;
+    // posiciones en el contenido
+    float cx[16], cw[16], tot = 0;
+    for (int i = 0; i < kNumMaps; ++i) { cw[i] = i == s_map ? ws : wb; cx[i] = tot; tot += cw[i] + (i + 1 < kNumMaps ? gap : 0); }
+    s_minS = pad + cw[0] * 0.5f - SW * 0.5f; s_maxS = pad + tot - cw[kNumMaps - 1] * 0.5f - SW * 0.5f;
+    const float target = ClampScroll(pad + cx[s_map] + cw[s_map] * 0.5f - SW * 0.5f);
+    static double lastT = 0; const double now = NowMs(); const float dt = lastT > 0 ? (float)fminf(0.1f, (float)((now - lastT) / 1000.0)) : 0.016f; lastT = now;
+    if (s_snap) { s_scroll = target; s_snap = false; }
+    else if (s_follow && !s_dragging) s_scroll += (target - s_scroll) * (1.0f - expf(-12.0f * dt));
+    s_scroll = ClampScroll(s_scroll);
+    {   // avance en video: ~1,5 s con la misma portada elegida y sin tocar la pantalla
+        static int lastSel = -1; static double since = 0;
+        if (lastSel != s_map || s_dragging || s_ptrDown) { lastSel = s_map; since = NowMs(); if (s_pv.map >= 0) PreviewStop(); }
+        else if (s_pv.map < 0 && s_pv.failMap != s_map && s_mapOk[s_map] && NowMs() - since > 1500) PreviewStart(s_map);
+    }
+    const float shade[3][4] = { { 1, 1, 1, 1 }, { 0.58f, 0.58f, 0.58f, 1 }, { 0.30f, 0.30f, 0.30f, 1 } };
+    const float grad[4] = { 0, 0, 0, 0.62f }, dark[4] = { 0.08f, 0.08f, 0.08f, 1 };
+    for (int i = 0; i < kNumMaps; ++i) {
+        const bool sel = i == s_map, ok = s_mapOk[i];
+        const float w = cw[i], h = sel ? hs : hb, x = L + pad + cx[i] - s_scroll, y = cy - h * 0.5f;
+        if (x + w < L - 4 * u || x > L + SW + 4 * u) continue;
+        const float *tint = sel ? (ok ? shade[0] : shade[1]) : (ok ? shade[1] : shade[2]);
+        float pw0 = 1, ph0 = 1; Material *pvm = sel && s_pv.map == i ? PreviewMat(&pw0, &ph0) : nullptr;
+        if (pvm) PicCover(pvm, x, y, w, h, pw0, ph0, kWhite);
+        else if (s_mapMat[i]) PicCover(s_mapMat[i], x, y, w, h, 1, 1, tint); else { Rect(x, y, w, h, dark); }
+        Rect(x, y + h * 0.60f, w, h * 0.40f, grad);
+        char num[8]; snprintf(num, sizeof num, "%02d", i + 1);
+        Text(s_fSmall, num, x + 10 * u, y + 24 * u, fminf(18 * u, h * 0.12f), kLabel);
+        const float lp = FitPx(s_fBig, kMaps[i].label, sel ? 30 * u : 22 * u, w - 24 * u);
+        Text(s_fBig, kMaps[i].label, x + 12 * u, y + h - 12 * u, lp, ok ? kWhite : kGrey);
+        if (!ok) { const char *na = "NOT INSTALLED"; const float np = 13 * u; Text(s_fSmall, na, x + w - TextW(s_fSmall, na, np) - 8 * u, y + 20 * u, np, kGrey); }
+        if (sel) Frame(x - 3 * u, y - 3 * u, w + 6 * u, h + 6 * u, fmaxf(2.0f, 3 * u), kRedHi);
+        const float hx = fmaxf(x, L), hw = fminf(x + w, L + SW) - hx;
+        if (hw > 0) AddHit(IT_MAP0 + i, hx, y, hw, h);
+    }
+    // franja de informacion del mapa elegido
+    const float iy = railTop + railH + 10 * u, ix = L + 28 * u, iw = SW - 56 * u;
+    const MapEntry &m = kMaps[s_map];
+    const float np = FitPx(s_fBig, m.label, 34 * u, iw * 0.55f);
+    Text(s_fBig, m.label, ix, iy + 34 * u, np, kWhite);
+    if (s_mapOk[s_map]) { const char *tip = "TAP AGAIN TO START"; const float tp = 15 * u; Text(s_fSmall, tip, ix + iw - TextW(s_fSmall, tip, tp), iy + 30 * u, tp, kLabel); }
+    std::string d = s_mapOk[s_map] ? s_desc[s_map] : std::string("The data for this map is not installed. Add it to the game folder (docs/NUEVO_MAPA.md) to play it.");
+    float by = iy + 58 * u; int n = 0;
+    for (const std::string &l : Wrap(s_fNormal, d, 18 * u, iw)) { if (n++ >= 2) break; Text(s_fNormal, l.c_str(), ix, by, 18 * u, kHint); by += 21 * u; }
+    DrawBottom(L + 28 * u, L + SW - 28 * u, T + SH - rowH - 12 * u, rowH);
+}
+// boton de arriba a la derecha: cambia entre portadas y lista
+void DrawViewToggle()
+{
+    const float u = U(), L = s_safe[0], T = s_safe[1], SW = s_W - s_safe[0] - s_safe[2];
+    const float h = fmaxf(36 * u, RowMin()), bw = fmaxf(200 * u, h * 4.2f), x = L + SW - bw - 20 * u, y = T + 10 * u;
+    const char *t = s_view ? "SHOW COVERS" : "SHOW LIST"; const bool focus = s_focus == IT_VIEW;
+    Rect(x, y, bw, h, focus ? kWhite : kBar);
+    const float tp = FitPx(s_fNormal, t, fminf(h * 0.60f, 24 * u), bw - 24 * u);
+    TextC(s_fNormal, t, x + bw * 0.5f, y + h * 0.5f + tp * 0.36f, tp, focus ? kBlack : kWhite);
+    AddHit(IT_VIEW, x, y, bw, h);
 }
 
 void Draw()
@@ -397,7 +568,8 @@ void Draw()
     Rect(0, 0, (float)s_W, (float)s_H, kBlack);
     const float dim[4] = { 0.80f, 0.80f, 0.80f, 1 }, dim2[4] = { 0.55f, 0.55f, 0.55f, 1 };
     if (s_bg) PicCover(s_bg, 0, 0, (float)s_W, (float)s_H, 1, 1, s_scr == SETUP ? dim : dim2);   // fondo a pantalla completa (tambien bajo el recorte)
-    if (s_scr == SETUP) DrawSetup(); else DrawMission();
+    if (!(s_scr == MISSION && s_view == 0) && s_pv.map >= 0) PreviewStop();
+    if (s_scr == SETUP) DrawSetup(); else { if (s_view == 0) DrawMissionCovers(); else DrawMissionList(); DrawViewToggle(); }
     if (!s_notice.empty() && NowMs() - s_noticeT < 4000) {
         const float u = U(); const float w = TextW(s_fNormal, s_notice.c_str(), 20 * u) + 40 * u, x = (s_W - w) * 0.5f, y = s_safe[1] + 8 * u;   // arriba: no tapa BACK ni la lista
         const float c[4] = { 0, 0, 0, 0.8f }; Rect(x, y, w, 36 * u, c); TextC(s_fNormal, s_notice.c_str(), s_W * 0.5f, y + 25 * u, 20 * u, kWhite);
@@ -418,7 +590,8 @@ void Activate(int id)
         s_coop = true; Notice("Local co-op: you host, others join. Joining from here opens with the client view."); break;
     case IT_HIGH: SetQuality(2); break;
     case IT_LOW: SetQuality(0); break;
-    case IT_CHOOSE: s_scr = MISSION; s_focus = IT_MAP0 + s_map; fprintf(stderr, "[H21] pantalla MISSION SELECT\n"); break;
+    case IT_VIEW: s_view ^= 1; s_snap = true; s_follow = true; SavePrefs(); break;
+    case IT_CHOOSE: s_scr = MISSION; s_snap = true; s_follow = true; s_focus = IT_MAP0 + s_map; fprintf(stderr, "[H21] pantalla MISSION SELECT\n"); break;
     case IT_HELL: Notice("Hell mode is not available (vel.gg mod, not in the game data)."); break;
     case IT_BACK: s_scr = SETUP; s_focus = IT_CHOOSE; fprintf(stderr, "[H21] pantalla GAME SETUP\n"); break;
     case IT_START: if (!s_mapOk[s_map]) { Notice("This map's data is not installed."); break; } s_launch = true; s_launchMap = s_map; break;
@@ -435,13 +608,13 @@ void Focus(int id)
 {
     if (id == s_focus) return;
     s_focus = id; if (id != IT_NAME) s_editName = false;
-    if (id >= IT_MAP0 && id < IT_MAP0 + kNumMaps) s_map = id - IT_MAP0;   // en la lista el foco elige (y muestra la imagen), como el original
+    if (id >= IT_MAP0 && id < IT_MAP0 + kNumMaps) { s_map = id - IT_MAP0; s_follow = true; }   // en la lista el foco elige (y muestra la imagen), como el original
 }
 const int kSetupOrder[] = { IT_NAME, IT_SOLO, IT_COOP, IT_HIGH, IT_LOW, IT_CHOOSE };
 void Move(int d)
 {
     std::vector<int> v;
-    if (s_scr == SETUP) v.assign(kSetupOrder, kSetupOrder + 6); else { for (int i = 0; i < kNumMaps; ++i) v.push_back(IT_MAP0 + i); v.push_back(IT_HELL); v.push_back(IT_BACK); v.push_back(IT_START); }
+    if (s_scr == SETUP) v.assign(kSetupOrder, kSetupOrder + 6); else { for (int i = 0; i < kNumMaps; ++i) v.push_back(IT_MAP0 + i); if (s_view) v.push_back(IT_HELL); v.push_back(IT_VIEW); v.push_back(IT_BACK); v.push_back(IT_START); }
     int k = 0; for (size_t i = 0; i < v.size(); ++i) if (v[i] == s_focus) k = (int)i;
     k = (k + d + (int)v.size()) % (int)v.size(); Focus(v[k]);
 }
@@ -458,6 +631,7 @@ void Key(int key)
     case K_LEFTARROW: case K_RIGHTARROW:
         if (s_scr == SETUP) { if (s_focus == IT_SOLO || s_focus == IT_COOP) { Focus(s_focus == IT_SOLO ? IT_COOP : IT_SOLO); Activate(s_focus); }
             else if (s_focus == IT_HIGH || s_focus == IT_LOW) { Focus(s_focus == IT_HIGH ? IT_LOW : IT_HIGH); Activate(s_focus); } }
+        else if (s_view == 0) Move(key == K_LEFTARROW ? -1 : 1);
         break;
     case K_ENTER: Activate(s_focus); break;
     case K_ESCAPE: if (s_scr == MISSION) Activate(IT_BACK); break;
@@ -478,12 +652,37 @@ int HitNear(float px, float py)
 // puntero: raton (hover + clic) y dedo (down/up). Un toque en un mapa que no estaba elegido solo lo elige (muestra la imagen);
 // el segundo toque (o el clic con el raton, que ya lo eligio al pasar por encima) lo arranca.
 int s_downId = IT_NONE; bool s_downWasFocus;
-void PointerMove(float px, float py) { const int id = HitAt(px, py); if (id != IT_NONE) Focus(id); }
-void PointerDown(float px, float py) { s_downId = HitNear(px, py); s_downWasFocus = s_downId == s_focus; if (s_downId != IT_NONE) Focus(s_downId); else s_editName = false; }
+bool IsMapId(int id) { return id >= IT_MAP0 && id < IT_MAP0 + kNumMaps; }
+void PointerMove(float px, float py)
+{
+    if (s_scr == MISSION && s_view == 0) {   // portadas: el dedo arrastra el carrusel; el raton sin pulsar solo da foco a los botones (elegir una portada cambia el diseno)
+        if (s_ptrDown && s_dragCand) {
+            const float slop = fmaxf(8.0f, g_h10Dpi > 0 ? 0.06f * g_h10Dpi : 0.0f);
+            if (!s_dragging && fabsf(px - s_dragX0) > slop) { s_dragging = true; s_follow = false; }
+            if (s_dragging) s_scroll = ClampScroll(s_dragS0 - (px - s_dragX0));
+        } else if (!s_ptrDown) { const int id = HitAt(px, py); if (id != IT_NONE && !IsMapId(id)) Focus(id); }
+        return;
+    }
+    const int id = HitAt(px, py); if (id != IT_NONE) Focus(id);
+}
+void PointerDown(float px, float py)
+{
+    const bool covers = s_scr == MISSION && s_view == 0;
+    s_ptrDown = true; s_dragging = false; s_dragX0 = px; s_dragS0 = s_scroll;
+    s_dragCand = covers && py >= s_railY0 && py <= s_railY1;
+    s_downId = HitNear(px, py); s_downWasFocus = s_downId == s_focus;
+    if (s_downId != IT_NONE) { if (!(covers && IsMapId(s_downId))) Focus(s_downId); }   // en portadas la eleccion espera al soltar (si el dedo arrastra, no elige)
+    else s_editName = false;
+}
 void PointerUp(float px, float py)
 {
+    s_ptrDown = false;
+    if (s_dragging) { s_dragging = false; s_downId = IT_NONE; return; }
     const int id = HitNear(px, py);
-    if (id != IT_NONE && id == s_downId) { if (id >= IT_MAP0 && id < IT_MAP0 + kNumMaps && !s_downWasFocus) { /* primer toque: solo elige */ } else Activate(id); }
+    if (id != IT_NONE && id == s_downId) {
+        if (IsMapId(id) && !s_downWasFocus) { if (s_scr == MISSION && s_view == 0) Focus(id); /* primer toque: solo elige */ }
+        else Activate(id);
+    }
     s_downId = IT_NONE;
 }
 
@@ -555,6 +754,7 @@ void PilotStep(int frame)
 // ---------------------------------------------------------------- lanzar el mapa elegido (relanza el proceso como h18/h11)
 void Launch(int i)
 {
+    PreviewStop();
     const MapEntry &m = kMaps[i];
     SavePrefs();
     const std::string pd = PlayersDir();

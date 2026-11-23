@@ -96,7 +96,8 @@ static void LoadFF(const char *path)
         g_copyInfoCount = 0;
     }
     printf("%s: %d assets\n", zn.c_str(), g_varXAssetList.assetCount);
-    CloseHandle(h);
+    // DB_LoadXFile ya cierra el descriptor (DB_CancelLoadXFile -> CloseHandle(g_load.f)); cerrarlo aqui otra vez era un doble close():
+    // en Android otro hilo reutiliza el numero entre los dos cierres y fdsan aborta el proceso (abort al empezar el mapa).
 }
 void H0_LoadZoneFile(const char *path) { LoadFF(path); }   // OLA U2: h21_menu.cpp (en_patch.ff con las descripciones de los mapas)
 

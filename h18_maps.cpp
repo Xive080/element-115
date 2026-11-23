@@ -87,6 +87,15 @@ const char *H18_Map() { return s_map.empty() ? kDefaultMap : s_map.c_str(); }
 const char *H18_MapDir() { return s_dir.c_str(); }
 const char *H18_BaseDir() { return s_base.c_str(); }                                                  // OLA U1 (h21_menu.cpp): players/ y .iwd de la base
 bool H18_MapPlayable(const char *zone) { return Find(zone) && !PickDir(zone).empty(); }             // OLA U1: datos completos instalados
+// OLA U2d: video de carga de un mapa concreto (el menu lo usa de avance en la portada elegida); "" si no hay fichero
+const char *H18_VideoFor(const char *zone)
+{
+    static std::string p; p.clear(); const H18Map *m = Find(zone);
+    if (!m || !m->video || !*m->video || getenv("H18_NOVIDEO")) return "";
+    const std::string d = PickDir(zone); if (d.empty()) return "";
+    const std::string q = d + "/" + m->video; if (IsFile(q)) p = q;
+    return p.c_str();
+}
 const char *H18_MapDirFor(const char *zone) { static std::string d; d = Find(zone) ? PickDir(zone) : std::string(); return d.c_str(); }   // OLA U2 (h21: en_patch.ff de cada mapa)
 
 // al principio de main / bo1_engine_main, antes de leer P3_GAMEDATA o el config
