@@ -67,6 +67,7 @@ UIS="ui/ui_shared ui/ui_main ui/ui_atoms ui/ui_localvars ui/ui_feeders ui/ui_uti
 for b in $UIS; do srcs="$srcs $Z/src/$b.cpp"; done
 srcs="$srcs $H/harness2/ui_p5.cpp"
 [ -n "$VK_BE" ] && srcs="$srcs $H/harness2/h6_loading.cpp"   # OLA 6b: pantalla "Loading shaders" (precompila pipelines.keys)
+[ -n "$VK_BE" ] && [ -n "$H5G" ] && srcs="$srcs $H/harness2/h22_video.cpp"   # OLA F3: video de carga del mapa (h22_codec.cpp aparte, abajo)
 srcs="$srcs $H/harness2/h7_gfx.cpp $Z/src/gfx_d3d/rb_postfx.cpp"   # OLA 7g: fidelidad grafica (mips altos, vision set, RB_BloomLDR original)
 for f in $H/harness2/h7c_gfx.cpp $Z/src/gfx_d3d/rb_fog.cpp; do case " $H8_XSRC $EXTRA " in *"$(basename $f)"*) ;; *) srcs="$srcs $f";; esac; done   # OLA 7c: brushmodels/smodels/fov/brazos/HUD + niebla (R_SetFrameFog original); sin duplicar si ya van en H8_XSRC/EXTRA
 case " $H8_XSRC $EXTRA " in *h7e_light.cpp*) ;; *) srcs="$srcs $H/harness2/h7e_light.cpp";; esac   # OLA 7e: luz de la sala + estado de cliente (luces de script, vision por planta, script_model de cliente)
@@ -162,6 +163,16 @@ if [ -n "$H5G" ] && [ -n "$H6SND" ]; then   # OLA 6a: salida de audio (miniaudio
   mkdir -p $O/maobj; MAO=$O/maobj/h5_audio_ma.o
   if [ ! -f $MAO ] || [ $H/harness2/h5_audio_ma.c -nt $MAO ]; then ${CXX/clang++/clang} -x c -std=c11 -O2 -w ${APP:+-fPIC} $NPFX -I $H/../third_party/miniaudio -c $H/harness2/h5_audio_ma.c -o $MAO || { echo "FAIL h5_audio_ma"; exit 1; }; fi
   LIBS="$MAO $LIBS"; if [ "$TARGET" = ndk ]; then LIBS="$LIBS -ldl -lm"; else LIBS="$LIBS -framework CoreAudio -framework AudioToolbox -framework CoreFoundation"; fi
+fi
+if [ -n "$VK_BE" ] && [ -n "$H5G" ]; then   # OLA F3: decodificador PORTABLE del video de carga (WebM VP9+Opus), compilado aparte sin el prelude
+  # libvpx + libopus estaticas: H22_DEPS=<dir con include/ y lib/> (Android: las del NDK de arm64); en el Mac, las de Homebrew si estan.
+  # Sin ellas se compila igual (sin H22_VPX) y el juego sigue sin video. H22_DEPS=none fuerza eso.
+  H22D=${H22_DEPS:-}; [ -z "$H22D" ] && [ "$TARGET" != ndk ] && command -v brew >/dev/null && H22D=$(brew --prefix 2>/dev/null)
+  H22FL=""; H22L=""; if [ -n "$H22D" ] && [ "$H22D" != none ] && [ -f "$H22D/lib/libvpx.a" ] && [ -f "$H22D/lib/libopus.a" ] && [ -f "$H22D/include/vpx/vpx_decoder.h" ]; then H22FL="-DH22_VPX -I$H22D/include"; H22L="$H22D/lib/libvpx.a $H22D/lib/libopus.a"; fi
+  mkdir -p $O/h22obj; H22O=$O/h22obj/h22_codec.o
+  if [ ! -f $H22O ] || [ $H/harness2/h22_codec.cpp -nt $H22O ] || [ $H/harness2/h22_codec.h -nt $H22O ] || [ "$(cat $O/h22obj/fl 2>/dev/null)" != "$H22FL" ]; then
+    ${CXX} -std=c++17 -O2 -w ${APP:+-fPIC} $NPFX $H22FL -c $H/harness2/h22_codec.cpp -o $H22O || { echo "FAIL h22_codec"; exit 1; }; echo "$H22FL" > $O/h22obj/fl; echo "CC h22_codec ${H22FL:+(libvpx+libopus)}"; fi
+  LIBS="$H22O $H22L $LIBS"
 fi
 [ -n "$GLES_BE" ] && srcs="$srcs $H/gles/d3d9_gles.cpp"
 [ -n "$EXTRA" ] && srcs="$srcs $EXTRA"

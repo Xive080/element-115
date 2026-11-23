@@ -49,6 +49,9 @@ extern "C" void h0_stub_abort(const char *name)
 }
 extern "C" void h0_stub_log(const char *name)
 {
+    // OLA F3: cada stub pasa siempre el mismo literal; mirar antes el puntero evita crear un std::string por llamada (algunos se llaman
+    // por particula o por elemento del HUD en cada frame)
+    static std::set<const char *> seenPtr; if (!seenPtr.insert(name).second) return;
     static std::set<std::string> seen;
     if (seen.insert(name).second) fprintf(stderr, "[stub0] %s (devuelve 0)\n", name);
 }

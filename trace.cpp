@@ -457,17 +457,18 @@ HRESULT IDirect3DDevice9::SetTexture(DWORD s, IDirect3DBaseTexture9 *t)
 #ifdef G9BE
     if (GLON) g9::SetTexture(s, t ? (g9::Tex *)tt->g : nullptr);   // g es el primer miembro en TTex/TCube/TVol
 #endif
+    g_ts.setTextures++; if (TraceOff()) return 0;   // OLA F3: con P3_TRACE=off ni FmtName/snprintf ni el mapa de nombres (todos "") en cada SetTexture
     if (!t) L("SetTexture s%u (null)", (unsigned)s);
     else L("SetTexture s%u tex#%d %ux%u %s '%s'", (unsigned)s, tt->id, tt->w, tt->h, FmtName(tt->fmt), TexTag(t));
-    g_ts.setTextures++; if (t) g_ts.texNames[TexTag(t)]++;
+    if (t) g_ts.texNames[TexTag(t)]++;
     return 0;
 }
-HRESULT IDirect3DDevice9::SetVertexShader(IDirect3DVertexShader9 *s) { DV->vs = static_cast<TVS *>(s); if (s) L("SetVertexShader vs#%d (%u bytes) '%s'", DV->vs->id, DV->vs->dwords * 4, NM(1, s)); else L("SetVertexShader (null)"); ++g_ts.setVS; if (s) g_ts.vsNames[NM(1, s)]++;
+HRESULT IDirect3DDevice9::SetVertexShader(IDirect3DVertexShader9 *s) { DV->vs = static_cast<TVS *>(s); if (TraceOff()) ++g_ts.setVS; else { if (s) L("SetVertexShader vs#%d (%u bytes) '%s'", DV->vs->id, DV->vs->dwords * 4, NM(1, s)); else L("SetVertexShader (null)"); ++g_ts.setVS; if (s) g_ts.vsNames[NM(1, s)]++; }   // OLA F3: traza apagada, sin mapa de nombres
 #ifdef G9BE
     if (GLON) g9::SetVS(s ? (g9::Shader *)static_cast<TVS *>(s)->g : nullptr);
 #endif
     return 0; }
-HRESULT IDirect3DDevice9::SetPixelShader(IDirect3DPixelShader9 *s) { DV->ps = static_cast<TPS *>(s); if (s) L("SetPixelShader ps#%d (%u bytes) '%s'", DV->ps->id, DV->ps->dwords * 4, NM(2, s)); else L("SetPixelShader (null)"); ++g_ts.setPS; if (s) g_ts.psNames[NM(2, s)]++;
+HRESULT IDirect3DDevice9::SetPixelShader(IDirect3DPixelShader9 *s) { DV->ps = static_cast<TPS *>(s); if (TraceOff()) ++g_ts.setPS; else { if (s) L("SetPixelShader ps#%d (%u bytes) '%s'", DV->ps->id, DV->ps->dwords * 4, NM(2, s)); else L("SetPixelShader (null)"); ++g_ts.setPS; if (s) g_ts.psNames[NM(2, s)]++; }   // OLA F3
 #ifdef G9BE
     if (GLON) g9::SetPS(s ? (g9::Shader *)static_cast<TPS *>(s)->g : nullptr);
 #endif

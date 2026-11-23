@@ -140,6 +140,8 @@ static void H5V_DrawActors(unsigned char techType)
                 ent->r.currentOrigin[1], ent->r.currentOrigin[2], mats[0].trans[0], mats[0].trans[1], mats[0].trans[2], H5V_DObjIsWorld ? "en mundo" : "locales a la entidad");
         }
         if (!shadow) { void H5L_Bind(int); H5L_Bind(e); }   // OLA 6b: bloque del atlas de luz y tecnica de esta entidad
+        extern bool H19_ActorShaderPush(int) __attribute__((weak)); extern void H19_ActorShaderPop() __attribute__((weak));   // OLA F1: setshaderconstant
+        const bool scsOn = !shadow && H19_ActorShaderPush && H19_ActorShaderPop && H19_ActorShaderPush(e);                     // del CSC (Wave Gun)
         const int numModels = DObjGetNumModels(obj);
         int boneIndex = 0, drewAny = 0;
         if (!shadow && getenv("H5_SKIN_DIAG")) { static int s_mN; static unsigned char s_last[2048]; if (e < 2048 && s_last[e] != numModels && s_mN < 80) { ++s_mN; s_last[e] = (unsigned char)numModels;
@@ -189,6 +191,7 @@ static void H5V_DrawActors(unsigned char techType)
             }
             boneIndex += nb;
         }
+        if (scsOn) H19_ActorShaderPop();
         if (!shadow) g_h5vActors += drewAny;
     }
 }

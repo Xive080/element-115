@@ -208,8 +208,8 @@ static void DrawBatch(size_t b, unsigned char techType)
     if (!tech) { ++g_skipped; return; }
     ctx.state->material = m; ctx.state->technique = tech; ctx.state->techType = techType;
     ctx.state->origMaterial = m; ctx.state->origTechType = techType;
-    static std::map<std::string, int> seen;
-    if (getenv("H4_ARGS") && seen.insert({ tech->name.get(), 1 }).second && seen.size() < 40) {
+    static std::map<std::string, int> seen; static const bool argsLog = getenv("H4_ARGS") != nullptr;   // OLA F3: getenv una vez, no por lote
+    if (argsLog && seen.insert({ tech->name.get(), 1 }).second && seen.size() < 40) {
         const MaterialPass *ps = &tech->passArray[0]; int n = ps->perPrimArgCount + ps->perObjArgCount + ps->stableArgCount;
         fprintf(stderr, "[H4args] %s (%s) tech=%s prim=%d obj=%d stable=%d:", m->info.name.get(), Material_GetTechniqueSet(m)->name.get(), tech->name.get(), ps->perPrimArgCount, ps->perObjArgCount, ps->stableArgCount);
         for (int i = 0; i < n; ++i) { const MaterialShaderArgument *a = &ps->args[i]; fprintf(stderr, " [t%d d%d i%d]", a->type, a->dest, (a->type == 3 || a->type == 5) ? a->u.codeConst.index : (int)a->u.codeSampler); }
@@ -331,8 +331,8 @@ void H4_DrawSkinnedSurf(Material *m, XSurface *xsurf, GfxPackedVertex *verts, un
         for (int i = 0; ts && i < 130; ++i) if (ts->techniques[i].get()) fprintf(stderr, " %d", i); fprintf(stderr, "\n"); } }   // OLA M1
     if (!tech) { ++g_h4SkinnedSkipped; return; }
     ++g_h4SkinnedTech[techType];
-    { static std::map<std::string, int> seenS;
-      if (getenv("H4_ARGS") && seenS.insert({ std::string(tech->name.get()) + "|" + m->info.name.get(), 1 }).second) {   // OLA M1: por tecnica Y material
+    { static std::map<std::string, int> seenS; static const bool argsLog = getenv("H4_ARGS") != nullptr;   // OLA F3: getenv una vez, no por superficie
+      if (argsLog && seenS.insert({ std::string(tech->name.get()) + "|" + m->info.name.get(), 1 }).second) {   // OLA M1: por tecnica Y material
         const MaterialPass *ps = &tech->passArray[0]; int n = ps->perPrimArgCount + ps->perObjArgCount + ps->stableArgCount;
         fprintf(stderr, "[H4args-skin] %s tech=%s(%d) prim=%d obj=%d stable=%d:", m->info.name.get(), tech->name.get(), techType, ps->perPrimArgCount, ps->perObjArgCount, ps->stableArgCount);
         for (int i = 0; i < n; ++i) { const MaterialShaderArgument *a = &ps->args[i]; fprintf(stderr, " [t%d d%d i%d]", a->type, a->dest, (a->type == 3 || a->type == 5) ? a->u.codeConst.index : (int)a->u.codeSampler); }
@@ -415,10 +415,16 @@ static void InitInput(GfxWorld *w)
         R_SetInputCodeConstant(&g_in, CONST_SRC_CODE_HERO_LIGHTING_B, 0, 0, 1, 0);
     }
     if (w->sunLight) {
+        // OLA F1: R_UpdateFrontEndDvarOptions (r_rendercmds.cpp): si cambia un r_lightTweak* (setsaveddvar del CSC, p. ej. el eclipse de
+        // Shangri-La con r_lightTweakSunLight 11/13) se vuelve a interpretar el sol del mapa con R_UpdateLightsFromDvars
+        if (R_LightTweaksModified()) { R_UpdateLightsFromDvars(); static int n; if (++n > 1) fprintf(stderr, "[H4] sol desde r_lightTweak*: luz %.2f -> difuso %.3f %.3f %.3f\n",
+            r_lightTweakSunLight ? r_lightTweakSunLight->current.value : 0.0f, w->sunLight->diffuseColor[0], w->sunLight->diffuseColor[1], w->sunLight->diffuseColor[2]); }
         const GfxLight *sun = w->sunLight.get();
+        // OLA F1: R_UpdateFrameSun (r_scene.cpp): setsunlight() del CSC (R_SetSunLightOverride) sustituye difuso y especular del sol
+        const float *dif = rg.useSunLightOverride ? rg.diffuseSunLightOverride : sun->diffuseColor, *spe = rg.useSunLightOverride ? rg.specularSunLightOverride : sun->specularColor;
         R_SetInputCodeConstant(&g_in, CONST_SRC_CODE_SUN_POSITION, sun->dir[0], sun->dir[1], sun->dir[2], 0);
-        R_SetInputCodeConstant(&g_in, CONST_SRC_CODE_SUN_DIFFUSE, sun->diffuseColor[0], sun->diffuseColor[1], sun->diffuseColor[2], 1);
-        R_SetInputCodeConstant(&g_in, CONST_SRC_CODE_SUN_SPECULAR, sun->specularColor[0], sun->specularColor[1], sun->specularColor[2], 1);
+        R_SetInputCodeConstant(&g_in, CONST_SRC_CODE_SUN_DIFFUSE, dif[0], dif[1], dif[2], 1);
+        R_SetInputCodeConstant(&g_in, CONST_SRC_CODE_SUN_SPECULAR, spe[0], spe[1], spe[2], 1);
     }
     { extern void H7C_Fog(GfxCmdBufInput *, const float *) __attribute__((weak)); if (H7C_Fog) H7C_Fog(&g_in, g_vp.origin); }   // OLA 7c: niebla del original (R_SetFrameFog)
     // OLA E3b: R_SetupLitConstants (r_draw_lit.cpp): mezcla del cielo (r_skyTransition), que usa el material del skybox (skycubemaphdr:

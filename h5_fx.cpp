@@ -214,6 +214,29 @@ void EntityEvent(int number, const gentity_s *e, int event, int eventParm, bool 
             static bool seen[64]; const unsigned st = e->s.surfType & 63;
             if (!seen[st]) { seen[st] = true; fprintf(stderr, "[H5FX] impacto surf %u: %s\n", st, fx->name.get()); DumpEffect(fx); } }
         return; }
+    case EV_GRENADE_EXPLODE: case EV_ROCKET_EXPLODE: case EV_ROCKET_EXPLODE_NOMARKS: case EV_FLASHBANG_EXPLODE:
+    case EV_CUSTOM_EXPLODE: case EV_CUSTOM_EXPLODE_NOMARKS: {
+        // OLA F2: CG_EntityEvent (cg_event.cpp) de las explosiones de proyectil (granadas, semtex, ray gun, ballesta, cohetes): efecto de
+        // impacto de la tabla del ff por superficie (salvo el flashbang) y el projExplosionEffect del arma, orientados con
+        // ByteToDir(eventParm) + Vec3Basis_RightHanded. EV_CUSTOM_* elige projExplosionEffect2..5 por lerp.u.loopFx.period. Sin agua
+        // simulada (r_watersim) ni Ragdoll/DynEnt/notify "explode" de cliente. El sonido lo pone h5_audio_cl. H5FX_EXPLODE=0 lo apaga.
+        static const bool on = !(getenv("H5FX_EXPLODE") && !atoi(getenv("H5FX_EXPLODE"))); if (!on) return;
+        const unsigned weapon = e->s.weapon;
+        if (!weapon || weapon >= BG_GetNumWeapons() || !cgMedia.fx) return;
+        const WeaponDef *wd = BG_GetWeaponDef(weapon); const int ev = event & 0xFF;
+        float pos[3]; memcpy(pos, e->r.currentOrigin, 12);
+        float axis[3][3]; ByteToDir(eventParm, axis[0]); Vec3Basis_RightHanded(axis[0], axis[1], axis[2]);
+        const FxEffectDef *ifx = nullptr; unsigned snd = 0;
+        if (ev != EV_FLASHBANG_EXPLODE && e->s.surfType < 31) CG_ImpactEffectForWeapon(weapon, e->s.surfType, 0, &ifx, &snd);
+        if (ifx) FX_PlayOrientedEffect(0, ifx, g_fxTime, pos, axis);
+        const FxEffectDef *xfx = wd->projExplosionEffect.get();
+        if (ev == EV_CUSTOM_EXPLODE || ev == EV_CUSTOM_EXPLODE_NOMARKS) switch (e->s.lerp.u.loopFx.period) {
+            case '1': xfx = wd->projExplosionEffect2.get(); break; case '2': xfx = wd->projExplosionEffect3.get(); break;
+            case '3': xfx = wd->projExplosionEffect5.get(); break; case '4': xfx = wd->projExplosionEffect4.get(); break; default: break; }
+        if (xfx) FX_PlayOrientedEffect(0, xfx, g_fxTime, pos, axis);
+        static int nExp; if (nExp++ < 24) fprintf(stderr, "[H5FX] explosion t=%d ev %d arma %s en (%.0f %.0f %.0f) surf %d: impacto %s, efecto %s\n", level.time, ev,
+            BG_GetWeaponVariantDef(weapon)->szInternalName.get(), pos[0], pos[1], pos[2], e->s.surfType, ifx ? ifx->name.get() : "-", xfx ? xfx->name.get() : "-");
+        return; }
     case EV_PLAY_FX: {   // CG_PlayFx
         const FxEffectDef *fx = EffectFor(eventParm);
         if (!fx) return;
@@ -274,7 +297,14 @@ void ServerFrameEvents()
             }
             continue;
         }
-        if (!s_entSeen[n] || s_entUse[n] != use) { s_entSeen[n] = true; s_entUse[n] = use; s_entSeq[n] = (unsigned short)e->s.eventSequence; s_tempTime[n] = -1; continue; }
+        if (!s_entSeen[n] || s_entUse[n] != use) {
+            s_entSeen[n] = true; s_entUse[n] = use; s_tempTime[n] = -1;
+            // OLA F2: entidad recien creada con su evento en el mismo frame (G_ExplodeMissile hace G_Spawn + G_AddEvent):
+            // G_Spawn la deja a cero, asi que se parte de la secuencia 0 y el evento no se pierde.
+            const bool fresh = e->r.eventTime && level.time - e->r.eventTime <= 100;
+            s_entSeq[n] = fresh ? 0 : (unsigned short)e->s.eventSequence;
+            if (!fresh) continue;
+        }
         const int seq = (unsigned short)e->s.eventSequence;
         int d = (seq - s_entSeq[n]) & 0xFF; if (d > 4) { s_entSeq[n] = (seq - 4) & 0xFFFF; d = 4; }
         for (int k = 0; k < d; ++k) { const int i = (s_entSeq[n] + k) & 3; EntityEvent(n, e, e->s.events[i], e->s.eventParms[i], false, nullptr); }

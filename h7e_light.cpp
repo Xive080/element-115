@@ -564,6 +564,7 @@ void H7E_ClientFrame()
     LightsFrame(now, dt, cam);
     ClocksFrame();   // OLA 15F: agujas de los relojes
     { extern void H19_FootFxFrame() __attribute__((weak)); if (H19_FootFxFrame) H19_FootFxFrame(); }   // OLA E1b: efectos de los pasos de la IA (h19_mapcl.cpp)
+    { extern void H19_WeapClFrame() __attribute__((weak)); if (H19_WeapClFrame) H19_WeapClFrame(); }   // OLA F2: caja, misiles y FX de armas (maps/h19_weap_cl.cpp)
     if (const H19MapCl *mc = H19_Map()) if (mc->frame) mc->frame(now);   // OLA M2: frame del mapa (antes KinoFrame, OLA M1)
     {   // H7E_NOTIFY="ms:evento,..." (prueba): inyecta levelNotify de cliente (p.ej. "100:vis3") como si llegaran del servidor
         static std::vector<std::pair<int, std::string>> q; static bool parsed;
@@ -584,6 +585,22 @@ void H7E_ClientFrame()
 static std::vector<char> s_farModel;
 static bool j_far(long j) { return j >= 0 && j < (long)s_farModel.size() && s_farModel[j]; }
 void H19_ModelFar(int j, bool far) { if (j < 0) return; if ((int)s_farModel.size() <= j) s_farModel.resize(j + 1, 0); s_farModel[j] = far; }
+// OLA F2: Hide/Show y useweaponhidetags (CScr_UseWeaponHideTags: bits de hueso como DObjSetHidePartBits) de los script_model de cliente
+// (arma de la caja, proyectiles). Un modelo oculto no se prepara ni se dibuja; las superficies con huesos ocultos no se dibujan.
+static std::vector<char> s_hideModel; static std::vector<unsigned> s_hideParts;   // 5 palabras por modelo
+static bool j_hidden(long j) { return j >= 0 && j < (long)s_hideModel.size() && s_hideModel[j]; }
+void H19_ModelHide(int j, bool hide) { if (j < 0) return; if ((int)s_hideModel.size() <= j) s_hideModel.resize(j + 1, 0); s_hideModel[j] = hide; }
+void H19_ModelHideParts(int j, const unsigned *bits)
+{
+    if (j < 0) return; if ((int)s_hideParts.size() < (j + 1) * 5) s_hideParts.resize((j + 1) * 5, 0u);
+    for (int k = 0; k < 5; ++k) s_hideParts[j * 5 + k] = bits ? bits[k] : 0u;
+}
+static bool j_surfHidden(long j, const XSurface *xs)
+{
+    if (j < 0 || (j + 1) * 5 > (long)s_hideParts.size()) return false;
+    unsigned v = 0; for (int k = 0; k < 5; ++k) v |= (unsigned)xs->partBits[k] & s_hideParts[j * 5 + k];
+    return v != 0;
+}
 void H7E_PrepareClientModels()
 {
     if (!s_on || s_models.empty() || !H5L_Prepare) return;
@@ -593,6 +610,7 @@ void H7E_PrepareClientModels()
         const float dx = m.org[0] - cam[0], dy = m.org[1] - cam[1], dz = m.org[2] - cam[2], d = sqrtf(dx * dx + dy * dy + dz * dz), r = m.m->radius + 8.0f;
         const bool far = j_far(&m - s_models.data());   // OLA E3b: sin tope de distancia (Tierra de Moon, skybox): el original no lo tiene
         m.vis = (far || d - r <= 1200.0f) && (d <= r || dx * fwd[0] + dy * fwd[1] + dz * fwd[2] >= 0.3f * d - r);   // mismo tope de distancia que los smodels
+        if (j_hidden(&m - s_models.data())) m.vis = false;   // OLA F2: Hide()
         if (m.vis && m.key >= 0) H5L_Prepare(m.key, m.org, half, false);   // CG_General: R_AddDObjToScene con lightingOrigin = origen
     }
 }
@@ -643,6 +661,7 @@ void H7E_DrawClientModels(unsigned char techType)
         bool built = false;
         for (int s = 0; s < ns && s < 64; ++s) {
             Material *mtl = skins ? skins[s].get() : nullptr; if (!mtl || !xs[s].vertCount) continue;
+            if (j_surfHidden((long)j, &xs[s])) continue;   // OLA F2: useweaponhidetags
             std::vector<GfxPackedVertex> &v = s_cache[j * 64 + s];
             if (v.empty()) {
                 if (!built && (int)m.bones.size() == nb * 16) { built = true; memcpy(skel, m.bones.data(), nb * sizeof(DObjSkelMat)); }   // OLA E2b: pose animada

@@ -6,6 +6,13 @@
 //  - pantallas de la caja (antes h9_video.cpp, ver abajo) y zombie_pentagon_fx.csc level._effect["test_spin_fx"].
 //  - zombie_pentagon_amb.csc (ascensores, minigun), zombie_pentagon_teleporter.csc (portales por la clientflag 5 del jugador),
 //    play_magic_box_tv_audio (sonido de las pantallas).
+//  - OLA F1: createfx de cliente (clientscripts/createfx/zombie_pentagon_fx.csc: 372 oneshotfx y 39 exploders: 2000 al empezar, 2001 y
+//    3500 con la corriente, 1001..1004 respiraderos del quad) con maps/h19_cfx.cpp; trap_fx_monitor("trap_quickrevive", "nhe") y
+//    ("trap_elevator", "she") (FX zapper o script_string en los script_struct sin modelo; "<loc>1" enciende, "<loc>0" apaga);
+//    zombie_pentagon_teleporter.csc: teleporter_fx_setup (portal del pack siempre encendido), teleporter_fx_init (clientflag 5 del
+//    jugador: portal normal / portal del pack en los pentagon_teleport_fx), teleporter_fx_cool_down ("cool_fx": portal mas cercano a menos
+//    de 512 u con zombie_pent_portal_cool 20 s o hasta end_cool_downs) y wait_for_teleport_aftereffect ("ae1": vision flare 0,4 s);
+//    _zombiemode.csc perk_start_up (parpadeo de las luces de ventajas en los perksacola al llegar la corriente).
 //   H19_FIVE=0 lo apaga (queda solo lo generico). H9_SCREENS=0 deja las pantallas con el modelo del mapa.
 #ifdef H5G
 #include <universal/q_shared.h>
@@ -25,15 +32,89 @@
 #include <vector>
 #include <mutex>
 #include "h19_mapcl.h"
+#include "h19_cfx.h"
+#include <universal/com_math.h>
+#include <universal/com_math_anglevectors.h>
 
 bool H7_VisionSetNaked(const char *name, float seconds) __attribute__((weak));   // h7_gfx.cpp
 int H7E_ClientModelByTn(const char *tn, int ordinal, const char *name) __attribute__((weak));   // h7e_light.cpp
 
 namespace {
+// ===================================================================================================== OLA F1: createfx, trampas y portales
+H19Cfx s_cfx;
+struct FPt { float org[3], ang[3]; std::string fx; unsigned h = 0; };
+struct FTrap { const char *name, *loc; std::vector<FPt> pts; };
+FTrap s_traps[2] = { { "trap_quickrevive", "nhe", {} }, { "trap_elevator", "she", {} } };
+struct Portal { float org[3], ang[3]; unsigned h = 0; int coolUntil = -1; };
+std::vector<Portal> s_portals; Portal s_packPortal; bool s_havePack, s_fxPack = true, s_flag, s_portalInit;   // s_fxPack = level.packtime del cliente grafico
+const float kUp[3] = { 0, 0, 0 };
+unsigned PlayKey(const char *key, const float *org, const float *ang)
+{
+    const char *p = H19Cfx_Path(s_cfx, key); return p ? H19_PlayFxAng(p, org, ang ? ang : kUp) : 0;
+}
+void Init(const std::vector<H19Kv> &ents)
+{
+    H19Cfx_Load(s_cfx, "Five", "clientscripts/zombie_pentagon_fx.csc", "clientscripts/createfx/zombie_pentagon_fx.csc");
+    H19Cfx_PerkInit(s_cfx, ents);   // _zombiemode.csc init_perk_machines_fx
+    for (const H19Kv &k : ents) {
+        const char *cn = H19_Str(k, "classname"), *tn = H19_Str(k, "targetname"); if (!cn || !tn) continue;
+        FPt p; memset(p.org, 0, 12); memset(p.ang, 0, 12); H19_Vec(k, "origin", p.org); H19_Vec(k, "angles", p.ang);
+        if (!strcmp(cn, "script_struct")) {
+            for (FTrap &t : s_traps) if (!strcmp(tn, t.name) && !H19_Str(k, "model")) {   // trap_fx_monitor: structs sin modelo
+                const char *ss = H19_Str(k, "script_string"); p.fx = ss ? ss : "zapper"; t.pts.push_back(p); }
+        }
+        if (!strcmp(tn, "pentagon_teleport_fx")) { Portal q; memcpy(q.org, p.org, 12); memcpy(q.ang, p.ang, 12); s_portals.push_back(q); }
+        if (!strcmp(tn, "pentagon_teleport_fx_pack")) { memcpy(s_packPortal.org, p.org, 12); memcpy(s_packPortal.ang, p.ang, 12); s_havePack = true; }
+    }
+    fprintf(stderr, "[H19] Five: trampas nhe %zu / she %zu puntos, %zu portales%s, %zu perksacola\n", s_traps[0].pts.size(), s_traps[1].pts.size(),
+        s_portals.size(), s_havePack ? " + portal del pack" : " (SIN portal del pack)", s_cfx.perks.size());
+}
+bool TrapNotify(const std::string &ev)   // trap_fx_monitor / trap_play_fx
+{
+    for (FTrap &t : s_traps) {
+        const std::string l = t.loc; if (ev != l + "1" && ev != l + "0") continue;
+        const bool on = ev.back() == '1';
+        for (FPt &p : t.pts) { H19_KillFx(p.h); if (on) { float f[3], r[3], u[3]; AngleVectors(p.ang, f, r, u);
+            const char *path = H19Cfx_Path(s_cfx, p.fx.c_str()); if (path) p.h = H19_PlayFx(path, p.org, f, u); } }
+        fprintf(stderr, "[H19] Five: trampa %s %s (%zu FX)\n", t.loc, on ? "encendida" : "apagada", t.pts.size());
+        return true;
+    }
+    return false;
+}
+void PortalFrame(int now)   // teleporter_fx_setup / teleporter_fx_init / turn_off_cool_down_fx
+{
+    if (!s_portalInit) {   // waitforallclients: el portal del pack con portal_effect desde el principio
+        s_portalInit = true;
+        if (s_havePack) s_packPortal.h = PlayKey("zombie_pentagon_teleporter", s_packPortal.org, s_packPortal.ang);
+    }
+    const gentity_s &pl = g_entities[0];
+    const bool f = getenv("H19_FIVE_PORTALFLAG") ? atoi(getenv("H19_FIVE_PORTALFLAG")) != 0 : (pl.r.inuse && pl.client && ((pl.client->ps.eFlags2 >> 5) & 1));
+    if (f != s_flag) {
+        s_flag = f;
+        if (f && s_fxPack) { s_fxPack = false; for (Portal &p : s_portals) { H19_KillFx(p.h); p.coolUntil = -1; p.h = PlayKey("zombie_pentagon_teleporter", p.org, p.ang); } }
+        else if (!f && !s_fxPack) { s_fxPack = true; for (Portal &p : s_portals) { H19_KillFx(p.h); p.coolUntil = -1; p.h = PlayKey("zombie_pent_portal_pack", p.org, p.ang); } }   // end_cool_downs
+        fprintf(stderr, "[H19] Five: portales %s (clientflag 5 = %d) t=%d\n", s_fxPack ? "del pack" : "normales", f ? 1 : 0, now);
+    }
+    for (Portal &p : s_portals) if (p.coolUntil >= 0 && now >= p.coolUntil) {   // cool_down_timer: 20 s
+        p.coolUntil = -1; H19_KillFx(p.h); p.h = PlayKey(s_fxPack ? "zombie_pent_portal_pack" : "zombie_pentagon_teleporter", p.org, p.ang); }
+}
+void CoolFx(int now)   // teleporter_fx_cool_down: el portal mas cercano (< 512 u) al jugador, solo con los portales normales
+{
+    if (s_fxPack) return;
+    const float *o = g_entities[0].r.currentOrigin; Portal *best = nullptr; float bd = 512.0f;
+    for (Portal &p : s_portals) { const float dx = p.org[0] - o[0], dy = p.org[1] - o[1], dz = p.org[2] - o[2], d = sqrtf(dx * dx + dy * dy + dz * dz); if (d < bd) { bd = d; best = &p; } }
+    if (!best || !best->h) return;
+    H19_KillFx(best->h); best->h = PlayKey("zombie_pent_portal_cool", best->org, best->ang); best->coolUntil = now + 20000;
+    fprintf(stderr, "[H19] Five: cool_fx en el portal a %.0f u t=%d\n", bd, now);
+}
 // ===================================================================================================== luces y vision (zombie_pentagon.csc)
 bool s_power;   // level._power_on del cliente
 bool LevelNotify(const std::string &ev, int now)
 {
+    if (TrapNotify(ev)) return true;
+    if (ev == "cool_fx") { CoolFx(now); return true; }
+    if (ev == "ae1") { if (H7_VisionSetNaked && H19_EnvOn("H7E_VISION")) H7_VisionSetNaked("flare", 0.4f); return true; }   // wait_for_teleport_aftereffect
+    if (ev == "ZPO") H19Cfx_PerkStart(s_cfx, now);   // _zombiemode.csc ZPO_listener -> power_on -> perk_start_up
     if (ev == "ZPO") {   // pentagon_ZPO_listener + pentagon_office_light_model_swap
         s_power = true;
         H19_SwapModelByTn("model_interior_office_lights", "p_pent_light_ceiling_on", "p_pent_light_ceiling");
@@ -124,9 +205,15 @@ void Tick(Screen &s, int i, int now)   // magic_box_screen_swap
 // cualquier '9' que recibe h7e_light.cpp (ServerCmd) se encola para las pantallas; no se consume (levelNotify sigue su camino)
 bool SysState(const char *sys, const std::string &st, int)
 {
+    if (sys && !strcmp(sys, "@exploder")) { H19Cfx_QueueExploder(s_cfx, st); return true; }
     if (!sys || !s_tvOn) return false;
     std::lock_guard<std::mutex> l(s_mx); s_q.push_back({ sys, st });
     return false;
+}
+void Frame(int now)
+{
+    H19Cfx_Frame(s_cfx, now);
+    PortalFrame(now);
 }
 void ScreensFrame()
 {
@@ -210,8 +297,8 @@ void AudioStatus(std::string &out) { out += std::string("; portal ") + (s_packti
 } // namespace
 
 extern const H19MapCl kH19_zombie_pentagon = {
-    .zone = "zombie_pentagon", .offEnv = "H19_FIVE", .estado = "Five: luces/vision por planta, pantallas de la caja, ascensores y portales (OLA 7e/9/14)",
-    .init = nullptr, .levelNotify = LevelNotify, .sysState = SysState, .frame = nullptr, .clockHand = nullptr, .screensFrame = ScreensFrame,
+    .zone = "zombie_pentagon", .offEnv = "H19_FIVE", .estado = "Five: luces/vision por planta, pantallas de la caja, ascensores y portales (OLA 7e/9/14), createfx, exploders, trampas, FX de portales y ventajas (OLA F1)",
+    .init = Init, .levelNotify = LevelNotify, .sysState = SysState, .frame = Frame, .clockHand = nullptr, .screensFrame = ScreensFrame,
     .levelEffect = LevelEffect,
 #ifdef H6SND
     .audioStart = AudioStart, .audioNotify = AudioNotify, .audioSys = AudioSys, .audioFrame = AudioFrame, .audioStatus = AudioStatus,

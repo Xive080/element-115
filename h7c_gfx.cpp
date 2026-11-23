@@ -99,7 +99,8 @@ static const std::vector<BmGroup> &BmGroups(int mi)
 }
 static void DrawBModels(unsigned char techType)
 {
-    static int logged = 0; const bool log = getenv("H7C_BMODEL_LOG") && logged < 3;
+    static int logged = 0; static const bool logEnv = getenv("H7C_BMODEL_LOG") != nullptr; const bool log = logEnv && logged < 3;   // OLA F3: getenv una vez
+    const char *skipEnv = getenv("H7C_BMODEL_SKIP");   // OLA F3: una vez por pase y no por modelo (h12_barrier la cambia en partida)
     int n = 0;
     for (int e = 0; e < level.num_entities && n < 1024; ++e) {
         gentity_s *ent = &g_entities[e];
@@ -109,7 +110,7 @@ static void DrawBModels(unsigned char techType)
         GfxScaledPlacement *pl = &s_bmPl[n++];
         memcpy(pl->base.origin, ent->r.currentOrigin, 12); AnglesToQuat(ent->r.currentAngles, pl->base.quat); pl->scale = 1.0f;
         if (log) fprintf(stderr, "[H7C] bmodel ent %d tipo %d modelo *%d en (%.0f,%.0f,%.0f) ang (%.0f,%.0f,%.0f) svf %x linked %d mat0 %s\n", e, ent->s.eType, mi, pl->base.origin[0], pl->base.origin[1], pl->base.origin[2], ent->r.currentAngles[0], ent->r.currentAngles[1], ent->r.currentAngles[2], ent->r.svFlags, (int)ent->r.linked, BmGroups(mi).empty() ? "-" : BmGroups(mi)[0].m->info.name.get());
-        if (const char *sk = getenv("H7C_BMODEL_SKIP")) { char t[16]; snprintf(t, sizeof t, ",%d,", mi); if (strstr(sk, t)) continue; }
+        if (const char *sk = skipEnv) { char t[16]; snprintf(t, sizeof t, ",%d,", mi); if (strstr(sk, t)) continue; }
         for (const BmGroup &g : BmGroups(mi)) H4_DrawSurfsPlaced(g.m, g.s.data(), (int)g.s.size(), g.prim, pl, techType);
     }
     if (log) { ++logged; fprintf(stderr, "[H7C] brushmodels dibujados: %d\n", n); }
@@ -277,7 +278,7 @@ static void DrawSModels(unsigned char techType, const std::vector<int> &list)
         ++drawn;
     }
     { extern void H9R_ObjectProbe(int) __attribute__((weak)); if (H9R_ObjectProbe) H9R_ObjectProbe(-1); }
-    static int logged; if (getenv("H7C_SMODEL_LOG") && (++logged % 40) == 0) { fprintf(stderr, "[H7C] smodels: %u en el mapa, %zu visibles, %d dibujados, %d superficies, cache %.1f MB\n", s_w->dpvs.smodelCount, s_smVis.size(), drawn, surfs, s_smCacheBytes / 1048576.0); }
+    static int logged; static const bool logEnv = getenv("H7C_SMODEL_LOG") != nullptr; if (logEnv && (++logged % 40) == 0) { fprintf(stderr, "[H7C] smodels: %u en el mapa, %zu visibles, %d dibujados, %d superficies, cache %.1f MB\n", s_w->dpvs.smodelCount, s_smVis.size(), drawn, surfs, s_smCacheBytes / 1048576.0); }
 }
 #endif
 void H7C_DrawWorldExtra(unsigned char techType)

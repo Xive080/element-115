@@ -21,7 +21,8 @@
 //    (tras "scd<N>": FX zombie_elec_pole_terminal + pole_spark cada 2..6 s en pole_fx_N), homepad_loop y linkall_2d ("pap1"),
 //    y el sonido de la chispa del cable (tele_spark_hit + bucle tele_spark_loop que sigue a la chispa).
 // OLA E1a: flytrap_lev_objects ("ag1": los 8 ee_floaty_stuff suben, giran y salen volando, con FX y sonido; ver FlytrapStart).
-// No se hace: zombify (zombie_grain; el GSC de este mapa no lo usa). La radio KZMB de _waw_zombiemode_radio no existe en este mapa
+// OLA F1: zombify (zombifyHandler/zombie_monitor: playfx zombie_grain cada 0,1 s; el servidor solo lo manda con
+// zombie_vars["zombify_player"], false en _zombiemode.gsc: como en el original, en partida normal no llega). La radio KZMB de _waw_zombiemode_radio no existe en este mapa
 // (no hay entidades kzmb); radios, fonografos, meteoritos y escondite son GSC puro (servidor) y no necesitan cliente.
 //   H19_FACTORY=0 lo apaga. H19_AE=n fija el efecto tras teletransporte (prueba).
 #ifdef H5G
@@ -30,6 +31,7 @@
 #include <universal/com_math.h>
 #include <universal/com_math_anglevectors.h>
 #include <game_mp/g_main_mp.h>
+#include <server_mp/server_mp.h>
 #include <gfx_d3d/r_bsp.h>
 #include <qcommon/com_bsp.h>
 #include <stdio.h>
@@ -48,6 +50,8 @@
 const FxEffectDef *__cdecl FX_Register(char *name);   // h5_fx.cpp
 extern FxSystemContainer *fx_systemPool;              // fx_system.cpp (lo reserva h5_fx)
 #endif
+void __cdecl SV_GetConfigstring(unsigned int index, char *buffer, int bufferSize);
+void __cdecl SV_GameSendServerCommand(int clientNum, svscmd_type type, const char *text);   // sv_game (H19_FACTORY_ZOMBIFY)
 // OLA M7: pose de los script_model de cliente (h7e_light.cpp; declarados aqui y no en h19_mapcl.h, que recompila todo)
 int H19_ModelCount();
 const char *H19_ModelTn(int j);
@@ -340,6 +344,33 @@ void Notify(const std::string &ev, int now)
 }
 bool LevelNotify(const std::string &ev, int now) { Notify(ev, now); return false; }   // false: los mezcladores genericos siguen (este mapa no tiene)
 
+// ---- OLA F1: zombify (zombie_cod5_factory.csc registerSystem("zombify", ::zombifyHandler) / zombie_monitor). "1": playfx(zombie_grain
+// = misc/fx_zombie_grain_cloud de zombie_cod5_factory_fx.csc, origen del jugador) cada realwait(0.1); "0" lo para. Lo manda zombify_player
+// (_zombiemode.gsc) solo con level.zombie_vars["zombify_player"], que el original deja en false. Prueba: H19_FACTORY_ZOMBIFY="ms_on,ms_off"
+// manda el '9' de GScr_ClientSysSetState("zombify") como el servidor.
+bool s_zombify; int s_grainAt;
+bool SysState(const char *sys, const std::string &st, int now)
+{
+    if (strcmp(sys, "zombify")) return false;
+    if (st == "1" && !s_zombify) { s_zombify = true; s_grainAt = now; fprintf(stderr, "[H19] Der Riese: zombify on (zombie_grain) t=%d\n", now); }
+    else if (st == "0" && s_zombify) { s_zombify = false; fprintf(stderr, "[H19] Der Riese: zombify off t=%d\n", now); }
+    return true;
+}
+void ZombifyFrame(int now)
+{
+    if (const char *e = getenv("H19_FACTORY_ZOMBIFY")) {
+        static int t[2] = { -1, -1 }; static bool parsed; if (!parsed) { parsed = true; sscanf(e, "%d,%d", &t[0], &t[1]); }
+        for (int k = 0; k < 2; ++k) if (t[k] >= 0 && level.time >= t[k]) { t[k] = -1;
+            for (int i = 0; i <= 8; ++i) { char cs[1024]; SV_GetConfigstring(i + 1538, cs, sizeof cs);
+                if (cs[0] && !strcmp(Info_ValueForKey(cs, "n"), "zombify")) { char c[64]; snprintf(c, sizeof c, "%c %i \\s\\%d", 57, i, k ? 0 : 1);
+                    SV_GameSendServerCommand(-1, SV_CMD_RELIABLE, c); fprintf(stderr, "[H19] H19_FACTORY_ZOMBIFY: '%s' (sistema %d) t=%d\n", c, i, level.time); } } }
+    }
+    if (!s_zombify || now < s_grainAt) return;
+    s_grainAt = now + 100;   // realwait(0.1)
+    static const float a[3] = { 270, 0, 0 };   // playfx de 3 parametros: CScr_SetFxAngles(0) = (270, 0, 0)
+    static int n; if (H19_PlayFxAng("misc/fx_zombie_grain_cloud", g_entities[0].r.currentOrigin, a) && ++n == 1) fprintf(stderr, "[H19] Der Riese: zombie_grain lanzado t=%d\n", now);
+}
+
 void Frame(int now)
 {
     for (int i = 0; i < 3; ++i) {   // chispa del cable: MoveTo(target, 0,1) por tramo; el FX va en el tag del mover (aqui se relanza en cada tramo)
@@ -355,6 +386,7 @@ void Frame(int now)
         ++w.step; w.next = now + 100;
     }
     FlytrapFrame(now);
+    ZombifyFrame(now);
     if (s_rxFlashNext >= 0 && now >= s_rxFlashNext) { LampSet("sm_light_tp_r", s_rxFlashRed ? 2 : 0); s_rxFlashRed = !s_rxFlashRed; s_rxFlashNext = now + 500; }
     if (s_rxGreenAt >= 0 && now >= s_rxGreenAt) { s_rxGreenAt = -1; LampSet("sm_light_tp_r", 1); fprintf(stderr, "[H19] receptor del PaP en verde\n"); }
     for (int i = 0; i < 3; ++i) if (s_polesOn[i]) for (Pole &q : s_poles[i]) if (now >= q.next) {   // realwait(randomintrange(2,7)) = 2..6 s
@@ -524,8 +556,8 @@ void AudioStatus(std::string &out)
 
 extern const H19MapCl kH19_zombie_cod5_factory = {
     .zone = "zombie_cod5_factory", .offEnv = "H19_FACTORY",
-    .estado = "Der Riese: niebla y perros, luces electricas, mapas y cables de los teletransportadores, trampas, postes, megafonia y sonido de corriente (OLA M4); huevo del flytrap (OLA E1a)",
-    .init = Init, .levelNotify = LevelNotify, .sysState = nullptr, .frame = Frame, .clockHand = nullptr, .screensFrame = nullptr,
+    .estado = "Der Riese: niebla y perros, luces electricas, mapas y cables de los teletransportadores, trampas, postes, megafonia y sonido de corriente (OLA M4); huevo del flytrap (OLA E1a); zombify (OLA F1)",
+    .init = Init, .levelNotify = LevelNotify, .sysState = SysState, .frame = Frame, .clockHand = nullptr, .screensFrame = nullptr,
     .levelEffect = nullptr,
 #ifdef H6SND
     .audioStart = AudioStart, .audioNotify = AudioNotify, .audioSys = nullptr, .audioFrame = AudioFrame, .audioStatus = AudioStatus,

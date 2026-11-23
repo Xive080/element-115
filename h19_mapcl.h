@@ -86,3 +86,10 @@ void H19A_PlayLoop(int f, const char *alias, float fadeSec);          // playloo
 void H19A_StopLoop(int f, float fadeSec);                             // stoploopsound
 void H19A_WorldSound(const float *org, const char *alias);            // playsound(0, alias, origin)
 struct gentity_s; gentity_s *H19A_PlayerEnt();
+
+// ---- OLA F3: emisores de sonido comunes de _audio.csc (maps/h19_snd_emitters.cpp; H6SND). Los llama h5_audio_cl.cpp; un mapa solo
+// usa H19S_EmittersNotify para sus level notify internos del CSC (p.ej. geyser_emitter de Shangri-La).
+void H19S_EmittersStart();
+void H19S_EmittersNotify(const std::string &n);
+void H19S_EmittersFrame();
+void H19S_EmittersStatus(std::string &out);

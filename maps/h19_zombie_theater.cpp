@@ -12,7 +12,11 @@
 //  - zombie_theater_amb.csc power_on_all (tras "pl1", que el cliente se notifica a si mismo al llegar "ZPO"): teleportation_audio
 //    ("tpa": evt_<script_sound>_warmup en cada struct telepad y _cooldown 2 s despues), teleport_2d ("t2d"), teleport_2d_nopad ("t2dn":
 //    warmup 2D y a los 1,3 s los dos 2D), teleport_beam_fx_2d ("t2bfx"), teleport_specialroom_start/go ("tss"/"tsg").
-// No se hace: la extracam (isExtraCam: pantalla del proyector en vivo) ni los vision sets de las salas del huevo de pascua.
+//  - OLA F1: createfx de cliente (clientscripts/createfx/zombie_theater_fx.csc, 190 oneshotfx y 58 exploders: quads del techo 10xx/20xx,
+//    teletransporte 102/201/202) con maps/h19_cfx.cpp; light_model_swap("smodel_light_electric", "lights_indlight_on") con "pl1";
+//    perk_start_up (parpadeo de las luces de ventajas); eeroom_visionset_init (disparadores de cliente trigger_eeroom_visionset: wait 1 y VisionSetNaked segun script_string; al salir
+//    "zombie_theater").
+// No se hace: la extracam (isExtraCam: pantalla del proyector en vivo; el harness no tiene segunda camara de render).
 //   H19_KINO=0 lo desactiva (vuelve el comportamiento generico). H19_AE=n fija el efecto tras teletransporte (prueba).
 #ifdef H5G
 #include <universal/q_shared.h>
@@ -20,6 +24,9 @@
 #include <universal/com_math.h>
 #include <universal/com_math_anglevectors.h>
 #include <game_mp/g_main_mp.h>
+#include <qcommon/cm_trace.h>
+#include <qcommon/cm_tracebox.h>
+#include <qcommon/cm_load.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,7 +36,9 @@
 #include <string>
 #include <vector>
 #include "h19_mapcl.h"
+#include "h19_cfx.h"
 
+int H7E_ClientModelByTn(const char *tn, int ordinal, const char *name) __attribute__((weak));   // h7e_light.cpp
 bool H7_VisionSetNaked(const char *name, float seconds) __attribute__((weak));   // h7_gfx.cpp
 const char *H7_VisionNakedName() __attribute__((weak));                           // h7_gfx.cpp
 void H7C_ClientVolFog(const float *v, int transitionMs) __attribute__((weak));     // h7c_gfx.cpp: setVolFog del CSC
@@ -48,6 +57,10 @@ int s_kboxInd = -1, s_kflashMs = 0, s_kflashNext = 0; bool s_kflashGreen;
 KPt s_kproj, s_kscreen; bool s_kprojOk, s_kscreenOk, s_kprojOn; unsigned s_kprojFx, s_kscreenFx;
 struct KStep { int at; std::string vis; float sec; float fov; };   // pasos de los efectos tras teletransporte
 std::vector<KStep> s_ksteps; std::string s_ksavedVis;
+H19Cfx s_cfx;   // OLA F1: createfx y exploders
+// eeroom_visionset_init: disparadores de cliente (brocha *N) con script_string
+struct ERoom { unsigned model; float org[3]; std::string vis; int state = 0, at = 0; };   // 0 fuera, 1 esperando wait(1), 2 dentro
+std::vector<ERoom> s_erooms;
 const char *H7Naked() { const char *n = H7_VisionNakedName ? H7_VisionNakedName() : nullptr; return n && *n ? n : "zombie_theater"; }
 
 void KinoFog(int which, float sec)   // 0 = level_fog_init / dog_stop_monitor, 1 = dog_start_monitor
@@ -91,15 +104,28 @@ void Init(const std::vector<H19Kv> &ents)
             if (!strcmp(tn, "struct_theater_screen")) { s_kscreen = p; s_kscreenOk = true; }
         }
     }
+    for (const H19Kv &k : ents) {   // GetEntArray(0, "trigger_eeroom_visionset", "targetname")
+        const char *tn = H19_Str(k, "targetname"), *m = H19_Str(k, "model");
+        if (!tn || strcmp(tn, "trigger_eeroom_visionset") || !m || m[0] != '*') continue;
+        ERoom r; r.model = (unsigned)atoi(m + 1); memset(r.org, 0, 12); H19_Vec(k, "origin", r.org);
+        const char *ss = H19_Str(k, "script_string"); if (!ss) continue;   // eeroom_visionset_on: sin script_string vuelve sin hacer nada
+        const std::string v = ss;
+        r.vis = v == "asylum_room" ? "zombie_theater_eroom_asylum" : v == "pentagon_room" ? "zombie_theater_erooms_pentagon" :
+                v == "girls_new_room" ? "zombie_theater_eroom_girlnew" : v == "girls_old_room" ? "zombie_theater_eroom_girlold" : "zombie_theater";
+        if (r.model && r.model < cm.numSubModels) s_erooms.push_back(r);
+    }
+    H19Cfx_Load(s_cfx, "Kino", "clientscripts/zombie_theater_fx.csc", "clientscripts/createfx/zombie_theater_fx.csc");
+    H19Cfx_PerkInit(s_cfx, ents);   // zombie_theater_fx.csc -> _zombiemode.csc init_perk_machines_fx
     size_t np = 0; for (auto &t : s_ktraps) np += t.pts.size();
     KinoFog(0, 0.1f);   // level_fog_init
-    fprintf(stderr, "[H19] Kino: %zu trampas (%zu puntos de FX), %zu luces de tablero de la caja, proyector %s, pantalla %s, niebla de cliente %s\n",
-        s_ktraps.size(), np, s_kbox.size(), s_kprojOk ? "si" : "NO", s_kscreenOk ? "si" : "NO", H7C_ClientVolFog ? "si" : "NO");
+    fprintf(stderr, "[H19] Kino: %zu trampas (%zu puntos de FX), %zu luces de tablero de la caja, proyector %s, pantalla %s, niebla de cliente %s, %zu salas del huevo\n",
+        s_ktraps.size(), np, s_kbox.size(), s_kprojOk ? "si" : "NO", s_kscreenOk ? "si" : "NO", H7C_ClientVolFog ? "si" : "NO", s_erooms.size());
 }
 void Notify(const std::string &ev, int now)
 {
     if (ev == "ZPO") {   // theatre_ZPO_listener + theater_light_model_swap
         s_power = true;
+        H19Cfx_PerkStart(s_cfx, now);   // _zombiemode.csc ZPO_listener -> power_on -> perk_start_up
         H19_SwapModelByTn("model_lights_on", "lights_hang_single", "lights_hang_single_on_nonflkr");
         H19_SwapModelByTn("model_lights_on", "zombie_zapper_cagelight", "zombie_zapper_cagelight_on");
         if (s_kboxInd != -1) KBoxMonitor(s_kboxInd, now);
@@ -116,6 +142,9 @@ void Notify(const std::string &ev, int now)
         fprintf(stderr, "[H19] trampa %s %s\n", loc.c_str(), on ? "encendida" : "apagada");
         return;
     }
+    if (ev == "pl1" && H7E_ClientModelByTn) {   // zombie_theater_fx.csc light_model_swap("smodel_light_electric", "lights_indlight_on")
+        static bool done; if (!done) { done = true; const int n = H7E_ClientModelByTn("smodel_light_electric", -1, "lights_indlight_on");
+            fprintf(stderr, "[H19] Kino: pl1: %d lamparas smodel_light_electric -> lights_indlight_on\n", n); } }
     if (ev == "sip" && !s_kprojOn) {   // projector_screen_fx
         s_kprojOn = true;
         if (s_kprojOk) s_kprojFx = H19_PlayFxAng("maps/zombie/fx_zombie_theater_projector_beam", s_kproj.org, s_kproj.ang);
@@ -148,11 +177,30 @@ void Notify(const std::string &ev, int now)
 bool LevelNotify(const std::string &ev, int now) { Notify(ev, now); return true; }   // Kino lo lleva todo (mezcladores incluidos)
 bool SysState(const char *sys, const std::string &st, int now)
 {
+    if (!strcmp(sys, "@exploder")) { H19Cfx_QueueExploder(s_cfx, st); return true; }
     if (I_stricmp(sys, "box_indicator")) return false;
     KBoxMonitor(atoi(st.c_str()), now); return true;
 }
+bool InERoom(const ERoom &r)   // istouching: caja del jugador contra la brocha del disparador
+{
+    const gentity_s &pl = g_entities[0]; if (!pl.r.inuse) return false;
+    trace_t tr; memset(&tr, 0, sizeof tr); const float zero[3] = { 0, 0, 0 };
+    CM_TransformedBoxTrace(&tr, pl.r.currentOrigin, pl.r.currentOrigin, pl.r.mins, pl.r.maxs, r.model, -1, r.org, zero);
+    return tr.startsolid || tr.allsolid;
+}
+void ERoomFrame(int now)   // theater_player_in_eeroom + trigger_thread(eeroom_visionset_on, eeroom_visionset_off)
+{
+    if (!H7_VisionSetNaked || !H19_EnvOn("H7E_VISION")) return;
+    for (ERoom &r : s_erooms) {
+        if (r.state == 0) { if (InERoom(r)) { r.state = 1; r.at = now + 1000; fprintf(stderr, "[H19] Kino: entra en la sala del huevo (%s) t=%d\n", r.vis.c_str(), now); } }
+        else if (r.state == 1) { if (now >= r.at) { H7_VisionSetNaked(r.vis.c_str(), 0); r.state = 2; } }   // wait(1.0) y VisionSetNaked
+        else if (!InERoom(r)) { H7_VisionSetNaked("zombie_theater", 0); r.state = 0; fprintf(stderr, "[H19] Kino: sale de la sala del huevo t=%d\n", now); }
+    }
+}
 void Frame(int now)
 {
+    H19Cfx_Frame(s_cfx, now);
+    ERoomFrame(now);
     if (s_kflashMs && now >= s_kflashNext) {
         for (int i = 0; i < 9; ++i) KBoxLoc(i, s_kflashGreen ? 1 : 0, false);
         s_kflashGreen = !s_kflashGreen; s_kflashNext = now + s_kflashMs;
@@ -212,7 +260,7 @@ void AudioFrame(bool)
 } // namespace
 
 extern const H19MapCl kH19_zombie_theater = {
-    .zone = "zombie_theater", .offEnv = "H19_KINO", .estado = "Kino: niebla y perros, tablero de la caja, trampas, proyector, teletransporte, reloj del PaP (OLA M1)",
+    .zone = "zombie_theater", .offEnv = "H19_KINO", .estado = "Kino: niebla y perros, tablero de la caja, trampas, proyector, teletransporte, reloj del PaP (OLA M1), createfx, exploders, lamparas y salas del huevo (OLA F1)",
     .init = Init, .levelNotify = LevelNotify, .sysState = SysState, .frame = Frame, .clockHand = ClockHand, .screensFrame = nullptr,
     .levelEffect = nullptr,
 #ifdef H6SND

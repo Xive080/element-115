@@ -122,7 +122,8 @@ void ModelProbe(GfxCmdBufContext ctx, const XSurface *xs, const GfxPackedVertex 
     }
     if (!g_worldDraw->reflectionProbes[p].reflectionImage) return;
     R_SetReflectionProbe(ctx, p); ++s_set;
-    if (getenv("H9_DIAG") && (s_set == 1 || s_set % 20000 == 0))
+    static const bool diag = getenv("H9_DIAG") != nullptr;   // OLA F3: getenv una vez, no por superficie
+    if (diag && (s_set == 1 || s_set % 20000 == 0))
         fprintf(stderr, "[H9R] sondas de modelo: %u superficies, %u con sonda fijada, %u consultas BSP (sondas del mapa %u)\n", s_calls, s_set, s_calc, g_worldDraw->reflectionProbeCount);
 }
 } // namespace

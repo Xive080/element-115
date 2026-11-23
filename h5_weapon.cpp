@@ -196,13 +196,17 @@ void H5E_Timed()
             float tg[3], R = 64.0f; char tn[96] = ""; bool okArgs = sscanf(ta.a.c_str(), "%*s %f %f %f %f", &tg[0], &tg[1], &tg[2], &R) >= 3;
             if (!okArgs && sscanf(ta.a.c_str(), "%*s %95s %f", tn, &R) >= 1) { float bd2 = 1e30f;
                 for (int i = 0; i < level.num_entities; ++i) { gentity_s *t = &g_entities[i];
-                    if (!t->r.inuse || !t->targetname || strcmp(SL_ConvertToString(t->targetname, SCRIPTINSTANCE_SERVER), tn)) continue;
+                    if (!t->r.inuse || ((!t->targetname || strcmp(SL_ConvertToString(t->targetname, SCRIPTINSTANCE_SERVER), tn))
+                        && (!t->model || strcmp(SL_ConvertToString(G_ModelName(t->model), SCRIPTINSTANCE_SERVER), tn)))) continue;   // OLA F1: o por modelo (script_model sin targetname)
                     float c[3], d2 = 0; for (int k = 0; k < 3; ++k) { c[k] = 0.5f * (t->r.absmin[k] + t->r.absmax[k]); d2 += (c[k] - pl->r.currentOrigin[k]) * (c[k] - pl->r.currentOrigin[k]); }
                     if (d2 < bd2) { bd2 = d2; memcpy(tg, c, 12); okArgs = true; } }
                 if (!okArgs) fprintf(stderr, "[H5E] guion: tpsee %s: no hay entidad con ese targetname\n", tn); }
             if (okArgs) {
                 const float mins[3] = { -15.0f, -15.0f, 0.0f }, maxs[3] = { 15.0f, 15.0f, 70.0f }, z0[3] = { 0, 0, 0 };
                 float best[3] = { 0, 0, 0 }, bd = 1e30f, bmiss = 1e30f; bool ok = false;
+                // OLA F1: H5E_SEEMASK=0x... cambia la mascara de la vista: 0x11 = SV_SightTracePoint de Player_GetUseList (solo solido),
+                // 0x280E833 = la de las balas (Bullet_Fire); la de por defecto incluye el playerclip, que no tapa ni el uso ni los disparos
+                const char *smE = getenv("H5E_SEEMASK"); const int seeMask = smE ? (int)strtol(smE, nullptr, 0) : 0x2810011;
                 for (int pass = 0; pass < 3 && !ok; ++pass)   // 1a: vista limpia (la que exige UseTriggerRequireLookAt); 2a: tolerante; 3a: el menor obstaculo
                 for (float r = 16.0f; r <= R + 0.5f && (!ok || pass == 2); r += 8.0f) for (int k = 0; k < 16; ++k) {
                     const float a = k * 0.39269908f, o[3] = { tg[0] + r * cosf(a), tg[1] + r * sinf(a), tg[2] };
@@ -213,7 +217,7 @@ void H5E_Timed()
                         const float fl = from[2] + (to[2] - from[2]) * tr.fraction + 1.0f, eye[3] = { o[0], o[1], fl + 60.0f };
                         const float d = sqrtf((eye[0] - tg[0]) * (eye[0] - tg[0]) + (eye[1] - tg[1]) * (eye[1] - tg[1]) + (eye[2] - tg[2]) * (eye[2] - tg[2]));
                         if (d > R || (pass < 2 && d >= bd)) continue;
-                        trace_t lt; col_context_t c2; G_TraceCapsule(&lt, eye, z0, z0, tg, pl->s.number, 0x2810011, &c2);
+                        trace_t lt; col_context_t c2; G_TraceCapsule(&lt, eye, z0, z0, tg, pl->s.number, seeMask, &c2);
                         const float miss = (1.0f - lt.fraction) * d;   // el blanco puede estar dentro de un modelo con colision (radio, mesa)
                         if (pass < 2 && lt.fraction < 0.97f && (pass == 0 || miss > 20.0f)) continue;
                         if (pass == 2) { if (miss >= bmiss) continue; bmiss = miss; }
@@ -227,13 +231,23 @@ void H5E_Timed()
             } }
         else if (!strcmp(cmd, "use")) { int ms = 1500; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eUseUntil = level.time + ms; }
         else if (!strcmp(cmd, "fire")) { int ms = 500; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eFireUntil = level.time + ms; }
+        else if (!strcmp(cmd, "ads")) { int ms = 1000; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eBtnUntil[11] = level.time + ms; }   // OLA F1: apuntar (+speed_throw, bit 11)
         else if (!strcmp(cmd, "jump") || !strcmp(cmd, "melee") || !strcmp(cmd, "frag")) {   // OLA E2b
             int ms = !strcmp(cmd, "frag") ? 300 : 200; sscanf(ta.a.c_str(), "%*s %d", &ms);
             g_h5eBtnUntil[cmd[0] == 'j' ? 10 : cmd[0] == 'm' ? 2 : 14] = level.time + ms; }
         else if (!strcmp(cmd, "weap")) { char wn[64] = ""; sscanf(ta.a.c_str(), "%*s %63s", wn); g_h5eWeapReq = (unsigned)BG_GetWeaponIndexForName(wn);   // OLA E3a: cambiar al arma
-            fprintf(stderr, "[H5E] guion: weap %s -> %u\n", wn, g_h5eWeapReq); }
+            { bool BG_PlayerHasWeapon(const playerState_s *, unsigned int);   // OLA F1: arma alternativa de la actual (y si esta en heldWeapons)
+              const unsigned cw = pl->client ? pl->client->ps.weapon : 0, alt = cw ? BG_GetWeaponVariantDef(cw)->altWeaponIndex : 0;
+              fprintf(stderr, "[H5E] guion: weap %s -> %u (actual %s estado %d, alternativa %s %s)\n", wn, g_h5eWeapReq, cw ? BG_WeaponName(cw) : "-",
+                  pl->client ? (int)pl->client->ps.weaponstate : -1, alt ? BG_WeaponName(alt) : "-", alt && BG_PlayerHasWeapon(&pl->client->ps, alt) ? "en mano" : "NO llevada"); } }
         else if (!strcmp(cmd, "tact")) { int ms = 300; sscanf(ta.a.c_str(), "%*s %d", &ms); g_h5eBtnUntil[15] = level.time + ms; }   // OLA E3a: granada tactica (bit 15: agujero negro, munecas)
         else if (!strcmp(cmd, "shot")) g_h5eShotReq = true;
+        else if (!strcmp(cmd, "entpos")) {   // OLA F1: entpos TARGETNAME -> origen de cada entidad con ese targetname (MoveZ/MoveTo del GSC)
+            char tn[96] = ""; sscanf(ta.a.c_str(), "%*s %95s", tn); int n = 0;
+            for (int i = 0; i < level.num_entities; ++i) { gentity_s *t = &g_entities[i];
+                if (!t->r.inuse || !t->targetname || strcmp(SL_ConvertToString(t->targetname, SCRIPTINSTANCE_SERVER), tn)) continue;
+                fprintf(stderr, "[H5E] guion: entpos %s #%d -> (%.1f,%.1f,%.1f)\n", tn, i, t->r.currentOrigin[0], t->r.currentOrigin[1], t->r.currentOrigin[2]); ++n; }
+            if (!n) fprintf(stderr, "[H5E] guion: entpos %s -> NO hay entidad con ese targetname\n", tn); }
         else if (!strcmp(cmd, "usetn") && pl->r.inuse) {   // OLA S1: usetn TARGETNAME -> el trigger con ese targetname mas cercano recibe "trigger" del jugador
             char tn[96] = ""; sscanf(ta.a.c_str(), "%*s %95s", tn); gentity_s *best = nullptr; float bd = 1e30f;
             for (int i = 0; i < level.num_entities; ++i) { gentity_s *t = &g_entities[i];

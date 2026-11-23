@@ -141,7 +141,9 @@ int main(int argc, char **argv)
     H18_ResolveBoot(0, nullptr);
     int W0 = AW, H0 = AH;
 #endif
-    H18_PlayLoadVideo();   // OLA M0: video de carga del mapa si existe (stub: sin reproductor todavia; nunca es un error)
+#if !(defined(M2_G9) && defined(D3D9_VK) && defined(H5G))
+    H18_PlayLoadVideo();   // OLA M0: video de carga del mapa si existe (sin backend Vulkan no hay reproductor; nunca es un error)
+#endif
 #ifdef H5G
     { void H10_PreBackend(int *, int *); H10_PreBackend(&W0, &H0); }   // OLA 10: resolucion interna y tope de texturas del config (h10_settings.cpp)
 #endif
@@ -176,6 +178,9 @@ int main(int argc, char **argv)
             g9::Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0xFF000000, 1.0f, 0);
             atexit([] { if (g9::Active()) { TraceDevice_ReleaseAll(); g9::Shutdown(); } });   // exit(1) de LoadFF etc. (los return los cubre g9guard)
             { extern void H6_PrewarmPipelines(int, int); H6_PrewarmPipelines(W0, H0); }   // OLA 6b: "Loading shaders" (h6_loading.cpp)
+#ifdef H5G
+            { extern int g_h22W, g_h22H; g_h22W = W0; g_h22H = H0; H18_PlayLoadVideo(); }   // OLA F3: video de carga con el backend ya creado (h22_video.cpp)
+#endif
         }
 #else
         if (useGL && !g9::Init(W0, H0, nativeWindow)) { fprintf(stderr, "[P4] g9::Init fallo\n"); return 1; }

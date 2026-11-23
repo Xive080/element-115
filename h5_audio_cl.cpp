@@ -1164,11 +1164,13 @@ std::map<std::string, int> s_notifySeen;
 void ClientSysStart()
 {
     s_clSysStarted = true;
+    H19S_EmittersStart();   // OLA F3: _audio.csc audio_init (random / looper / line_emitter) comun a todos los mapas
     if (const H19MapCl *mc = H19_Map()) if (mc->audioStart) mc->audioStart();   // OLA M2: entidades falsas del mapa (antes las de Five aqui)
 }
 void LevelNotify(const std::string &n)
 {
     ++s_notifySeen[n];
+    H19S_EmittersNotify(n);   // OLA F3: level waittill(script_string) de soundLoopThink / soundLineThink
     if (const H19MapCl *mc = H19_Map()) if (mc->audioNotify) mc->audioNotify(n);   // OLA M2 (Five: ascensores/minigun/portal; Kino: teletransporte)
 }
 // _load.csc last_stand_monitor / last_stand_thread / end_last_stand (los cambios de bus de _busing.csc no se emulan)
@@ -1211,6 +1213,7 @@ void ClientSysFrame()
         else if (const H19MapCl *mc = H19_Map()) { if (mc->audioSys) mc->audioSys(c.sys, c.state); }   // OLA M2 (Five: box_indicator de las pantallas)
     }
     s_cmdQ.clear();
+    H19S_EmittersFrame();   // OLA F3
     if (const H19MapCl *mc = H19_Map()) if (mc->audioFrame) mc->audioFrame(testFlag);   // OLA M2 (Kino: sonidos diferidos; Five: portales por la clientflag 5)
     const double now = NowMs();
     if (s_lastStand && now >= s_lsNextBeat)
@@ -1328,7 +1331,8 @@ static void H6A_Frame(bool serverFrame, const float *camOrg, const float *camAng
         std::string sy, no;
         for (auto &p : s_sysSeen) sy += " " + p.first + "x" + std::to_string(p.second);
         for (auto &p : s_notifySeen) no += " " + p.first + "x" + std::to_string(p.second);
-        std::string ex; if (const H19MapCl *mc = H19_Map()) if (mc->audioStatus) mc->audioStatus(ex);   // OLA M2 (Five: "; portal pack, energia no")
+        std::string ex; H19S_EmittersStatus(ex);   // OLA F3
+        if (const H19MapCl *mc = H19_Map()) if (mc->audioStatus) mc->audioStatus(ex);   // OLA M2 (Five: "; portal pack, energia no")
         fprintf(stderr, "[H6A] cliente t=%d: playlocalsound %d, stoplocalsound %d, fundidos %d, sistemas:%s; levelNotify:%s%s\n",
             level.time, s_localSnd, s_localStop, s_fades, sy.c_str(), no.c_str(), ex.c_str());
     }

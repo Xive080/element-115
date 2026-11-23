@@ -52,6 +52,7 @@
 #include <EffectsCore/fx_system.h>
 #include <qcommon/cm_trace.h>
 #include <qcommon/cm_load.h>
+#include <gfx_d3d/r_shader_constant_set.h>   // OLA F1: hinchado de la Wave Gun
 #ifdef H6SND
 #include <sound/snd_bank.h>
 #include <sound/snd_public_async.h>
@@ -814,6 +815,13 @@ void EggNotify(const std::string &ev, int now)
     }
 }
 
+// OLA F1: microwavegun_bloat: mapshaderconstant(0, "scriptVector3") y setshaderconstant(0, fraccion * 4, 0, 0, 0) cada 0,05 s hasta 1
+// (fraccion = edad / 2500 ms, 1000 ms en perros). El arnes no tiene ShaderConstantSet por entidad (cpose_t): el dibujo de actores
+// (h5_game.cpp) pregunta H19_ActorShaderPush(ent) y, si hay set, se aplica en el estado de origen (RB_ApplyShaderConstantSet) y se
+// deshace despues de sus superficies, como el ScopedShaderConstantSetUndo de R_RenderDrawSurfListMaterial.
+struct Bloat { int use, t0, dur; };
+std::map<int, Bloat> s_bloat; int s_bloatNow;
+ShaderConstantSet s_scsSaved; bool s_scsPushed;
 // ---- actores: clientflags 0 (baja gravedad), 2 (alma al tanque, CTT), 6 / 9 (Wave Gun), 7 / 8 (risers de baja gravedad y normales)
 struct ActSt { int use; unsigned fl; bool hit, lowg; std::vector<JointFx> eyes; int dustUntil, dustNext; bool dustLg; };
 std::map<int, ActSt> s_act;
@@ -845,7 +853,10 @@ void ActorsFrame(int now)
             if (s_mwHits <= 3) fprintf(stderr, "[H19] Moon: Wave Gun: golpe inicial ent %d (ojos) t=%d\n", n, now);
         }
         if (ch & (1u << 9)) {   // microwavegun_zombie_expand_response
-            if ((fl & (1u << 9)) && a.hit) { QueueSound(e->r.currentOrigin, "wpn_mgun_impact_zombie"); ++s_mwBloat; }   // microwavegun_bloat (scriptVector3 del shader: sin portar)
+            if ((fl & (1u << 9)) && a.hit) { QueueSound(e->r.currentOrigin, "wpn_mgun_impact_zombie"); ++s_mwBloat;   // microwavegun_bloat
+                const unsigned t = SL_FindLowercaseString("j_spinelower", SCRIPTINSTANCE_SERVER); float m[4][3];
+                s_bloat[n] = { e->s.lerp.useCount, now, (t && G_DObjGetWorldTagMatrix(e, t, m)) ? 2500 : 1000 };   // sin J_SpineLower = perro: 1000 ms
+                if (s_mwBloat <= 3) fprintf(stderr, "[H19] Moon: Wave Gun: hinchado ent %d (scriptVector3 0 -> 4 en %d ms) t=%d\n", n, s_bloat[n].dur, now); }
             else {
                 KillTagFx(a.eyes);
                 const unsigned t = SL_FindLowercaseString("j_spinelower", SCRIPTINSTANCE_SERVER); float m[4][3];
@@ -874,6 +885,9 @@ void ActorsFrame(int now)
         FollowTagFx(e, a.eyes);
     }
     for (auto it = s_act.begin(); it != s_act.end();) { if (alive.count(it->first)) { ++it; continue; } KillTagFx(it->second.eyes); it = s_act.erase(it); }   // entityshutdown
+    for (auto it = s_bloat.begin(); it != s_bloat.end();) { gentity_s *e = &g_entities[it->first];   // entityshutdown / otra entidad en el hueco
+        if (alive.count(it->first) && e->s.lerp.useCount == it->second.use) ++it; else it = s_bloat.erase(it); }
+    s_bloatNow = now;
 }
 // ---- jugador: clientflags 1 (soul swap), 2 (jadeo: vibracion), 8/9 (casco)
 unsigned s_plFl; bool s_plInit;
@@ -988,6 +1002,12 @@ void SkyDiag()   // H19_MOON_SKYDIAG=1: texturas y constantes de codigo de las t
         XSurface *xs; const int ns = XModelGetSurfaces(xm, &xs, 0); PTR32(Material) *sk = XModelGetSkins(xm, 0);
         fprintf(stderr, "[H19] cielo: modelo %d superficies radio %.0f\n", ns, xm->radius);
         for (int i = 0; i < ns && sk; ++i) if (sk[i].get()) mats.push_back(sk[i].get()); }
+    if (XModel *xm = DB_FindXAssetHeader(ASSET_TYPE_XMODEL, (char *)"p_zom_moon_earth", 0, -1).model) {   // OLA F1: materiales de la Tierra
+        XSurface *xs; const int ns = XModelGetSurfaces(xm, &xs, 0); PTR32(Material) *sk = XModelGetSkins(xm, 0);
+        fprintf(stderr, "[H19] Tierra: modelo %d superficies radio %.0f\n", ns, xm->radius);
+        for (int i = 0; i < ns && sk; ++i) if (Material *m = sk[i].get()) { mats.push_back(m);
+            fprintf(stderr, "[H19] Tierra material '%s' techset '%s' stateFlags %x\n", m->info.name.get(), m->techniqueSet.get() ? m->techniqueSet.get()->name.get() : "?",
+                (unsigned)m->stateFlags); } }
     for (Material *m : mats) { fprintf(stderr, "[H19] cielo material '%s'\n", m->info.name.get());
     for (int i = 0; i < m->textureCount; ++i) { const MaterialTextureDef &t = m->textureTable.get()[i]; const GfxImage *im = t.u.image.get();
         fprintf(stderr, "[H19] cielo tex %d sem %d hash %08x %s\n", i, t.semantic, t.nameHash, im ? im->name.get() : "?"); }
@@ -1251,6 +1271,24 @@ void AudioStatus(std::string &out)
 }
 #endif
 } // namespace
+
+// OLA F1: gancho del dibujo de actores (h5_game.cpp, debil): constantes de shader de la entidad (solo el hinchado de la Wave Gun)
+bool H19_ActorShaderPush(int ent)
+{
+    auto it = s_bloat.find(ent); if (it == s_bloat.end() || s_scsPushed) return false;
+    float f = (float)(s_bloatNow - it->second.t0) / (float)it->second.dur; f = f < 0 ? 0 : f > 1 ? 1 : f;
+    ShaderConstantSet scs; R_InitShaderConstantSet(&scs);
+    if (!R_MapShaderConstantSet(&scs, 0, "scriptVector3")) return false;
+    R_SetShaderConstantSetValue(&scs, 0, f * 4.0f, 0, 0, 0);
+    RB_SaveCurrentShaderConstantSetValues(&s_scsSaved, gfxCmdBufContext.source, &scs);
+    RB_ApplyShaderConstantSet(gfxCmdBufContext.source, &scs); s_scsPushed = true;
+    return true;
+}
+void H19_ActorShaderPop()
+{
+    if (!s_scsPushed) return;
+    RB_ApplyShaderConstantSet(gfxCmdBufContext.source, &s_scsSaved); s_scsPushed = false;
+}
 
 extern const H19MapCl kH19_zombie_moon = {
     .zone = "zombie_moon", .offEnv = "H19_MOON",
