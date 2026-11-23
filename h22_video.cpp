@@ -56,7 +56,7 @@ namespace {
 using Clk = std::chrono::steady_clock;
 double Ms(Clk::time_point a, Clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); }
 
-std::atomic<bool> s_skip{ false }, s_active{ false };
+std::atomic<bool> s_skip{ false }, s_active{ false }, s_loadDone{ false };   // s_loadDone: el video solo se puede saltar cuando la carga (mapa + shaders) ha terminado
 struct Aud { H22Clip *clip = nullptr; int ch = 2; float vol = 1; std::atomic<long long> frames{ 0 }; std::atomic<bool> ended{ false }; };
 struct Frame { std::vector<uint8_t> px; double pts = 0; };
 
@@ -94,7 +94,7 @@ void Render(float *out, unsigned int n, void *user)
 }
 #endif
 #ifdef H0_MACWIN
-void MacEv(int kind, float, float, int) { if (kind == 1 || kind == 4) s_skip = true; }   // clic o tecla
+void MacEv(int kind, float, float, int) { if ((kind == 1 || kind == 4) && s_loadDone) s_skip = true; }   // clic o tecla
 #endif
 
 void DecodeMain(Video *v)
@@ -222,7 +222,7 @@ bool Begin(const char *path)
     v->shot = getenv("H22_SHOT"); v->maxS = getenv("H22_MAXS") ? atof(getenv("H22_MAXS")) : 0;
     fprintf(stderr, "[H22] video de carga %dx%d %.2f fps %.1f s, audio %d Hz %d canales, %s; salida %dx%d, durante la carga\n", in.w, in.h, in.fps, in.seconds, in.audioRate, in.audioChannels, h22c_backend(), W, H);
     v->aud.clip = v->clip; v->aud.ch = in.audioChannels; { const char *vo = getenv("H6A_VOL"); v->aud.vol = vo ? (float)atof(vo) : 1.f; if (!(v->aud.vol >= 0)) v->aud.vol = 0; if (v->aud.vol > 1) v->aud.vol = 1; }
-    s_skip = false;
+    s_skip = false; s_loadDone = false;
 #ifdef H0_MACWIN
     if (getenv("P4_WINDOW")) H10_MacInputInstall(MacEv);
 #endif
@@ -247,6 +247,7 @@ void End()
     if (v->remote) Remote(false);
     v->lastPump -= std::chrono::milliseconds(5); Pump();   // cuenta tambien el ultimo tramo de la carga
     const double loadMs = Ms(v->t0, Clk::now());
+    s_loadDone = true;   // carga hecha: desde ahora el jugador puede saltar el video
     for (;;) {   // carga hecha: el video sigue hasta su final o hasta saltarlo (como el original)
         if (PresentDue(v)) break;
         Events(v, true);
@@ -277,5 +278,5 @@ bool BeginOrBlock(const char *path)   // H18_PlayLoadVideo: durante la carga sol
 struct Reg { Reg() { g_h18PlayVideo = Play; g_h18BeginVideo = BeginOrBlock; g_h18VideoRemote = Remote; g_h18EndVideo = End; } } s_reg;   // punteros nullptr constantes: ya inicializados
 } // namespace
 
-void H22_VideoSkip() { s_skip = true; }       // Android: toque o tecla durante el video
+void H22_VideoSkip() { if (s_loadDone) s_skip = true; }   // hasta que no acaba la carga (mapa y shaders) el video no se salta       // Android: toque o tecla durante el video
 bool H22_VideoActive() { return s_active; }   // Android: el toque es para saltar el video, no para el juego
