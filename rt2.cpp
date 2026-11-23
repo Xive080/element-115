@@ -173,7 +173,8 @@ H5W int Com_HashString(const char *fname, int len) { if (!fname) return 0; int h
 unsigned int Sys_GetDefaultWorkerThreadsCount() { return 1; }
 bool Sys_IsHeadlessClient() { return false; }
 #include <signal.h>
-static void h0_segv(int sig) { fprintf(stderr, "[SIGNAL %d]\n", sig); h0_bt(); _exit(5); }
+void H5P_CrashDiag() __attribute__((weak));   // h5_play.cpp (OLA S): reparto del pool XAnimInfo con H5_XADIAG=1
+static void h0_segv(int sig) { fprintf(stderr, "[SIGNAL %d]\n", sig); h0_bt(); if (H5P_CrashDiag) H5P_CrashDiag(); _exit(5); }
 #ifdef __ANDROID__
 #include <ucontext.h>
 static void h0_segv2(int sig, siginfo_t *si, void *uc)

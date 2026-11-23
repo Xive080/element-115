@@ -35,6 +35,8 @@
 #include <gfx_d3d/r_rendercmds.h>
 #include <gfx_d3d/r_font.h>
 #include <gfx_d3d/r_material.h>
+#include <xanim/xanim.h>
+#include <qcommon/dobj_management.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -371,6 +373,66 @@ static H5FState s_f; static bool s_fHave; static int s_fNextLog, s_fRoundShots, 
 extern "C" void H15_MemPhase(const char *phase);   // OLA 15A: memguard.cpp (H15_MEMPROFILE)
 static int s_fRoundStart[16], s_fMaxRound;
 static bool s_fShotNow;
+// OLA S (selftests): pool XAnimInfo (retail 4096; agotado -> XAnimAllocInfoWithParent aborta). La lista libre es el anillo que cuelga de
+// g_xAnimInfo[0] (XAnimInit). H5_XADIAG=1 reparte las entradas usadas por entidad (arbol del DObj del servidor) cada 5 s.
+extern XAnimInfo g_xAnimInfo[];
+static int H5P_XAnimInfoFree()
+{
+    int n = 0;
+    for (unsigned i = g_xAnimInfo[0].next; i && n < g_xAnimInfoCount; i = g_xAnimInfo[i].next) ++n;
+    return n;
+}
+static int H5P_XAnimCount(unsigned idx, int depth)
+{
+    int n = 0;
+    for (unsigned i = idx; i && n < g_xAnimInfoCount && depth < 64; i = g_xAnimInfo[i].next) n += 1 + (g_xAnimInfo[i].animToModel ? 0 : H5P_XAnimCount(g_xAnimInfo[i].children, depth + 1));
+    return n;
+}
+static void H5P_XAnimDiagPrint(bool dumpTop)
+{
+    int total = 0, ents = 0, actors = 0, actorInfos = 0, deadActors = 0, deadInfos = 0, top[4] = { -1, -1, -1, -1 }, topN[4] = { 0, 0, 0, 0 };
+    for (int e = 0; e < MAX_GENTITIES; ++e)
+    {
+        const gentity_s *ent = &g_entities[e]; if (!ent->r.inuse) continue;
+        const DObj *obj = Com_GetServerDObj(e); if (!obj || !obj->localTree) continue;
+        const int c = H5P_XAnimCount(obj->localTree->children, 0); if (!c) continue;
+        total += c; ++ents;
+        if (ent->s.eType == ET_ACTOR) { ++actors; actorInfos += c; if (ent->health <= 0) { ++deadActors; deadInfos += c; } }
+        for (int k = 0; k < 4; ++k) if (c > topN[k]) { for (int j = 3; j > k; --j) { top[j] = top[j - 1]; topN[j] = topN[j - 1]; } top[k] = e; topN[k] = c; break; }
+    }
+    char t[200] = ""; int p = 0;
+    for (int k = 0; k < 4 && top[k] >= 0; ++k) p += snprintf(t + p, sizeof t - p, " %d:%s=%d", top[k], SL_ConvertToString(g_entities[top[k]].classname, SCRIPTINSTANCE_SERVER), topN[k]);
+    fprintf(stderr, "[H5XA] t=%d usadas %d (en arboles de entidades %d de %d entidades; actores %d con %d, muertos %d con %d) mayores:%s\n", level.time,
+        g_xAnimInfoCount - 1 - H5P_XAnimInfoFree(), total, ents, actors, actorInfos, deadActors, deadInfos, t);
+    if (dumpTop && top[0] >= 0)
+    {
+        static char buf[16384];
+        DObjDisplayAnimToBuffer(Com_GetServerDObj(top[0]), "[H5XA] arbol de la entidad mayor:\n", buf, sizeof buf);
+        fputs(buf, stderr);
+    }
+}
+// cada frame de servidor con H5_XADIAG=1: cada 5 s, y en cuanto las libres bajan 256 desde la ultima linea (pico) o quedan menos de 512
+static void H5P_XAnimDiag()
+{
+    static const bool on = getenv("H5_XADIAG") && atoi(getenv("H5_XADIAG"));
+    if (!on) return;
+    static int s_last = -1, s_next = 0; static bool s_dumped;
+    const int fr = H5P_XAnimInfoFree();
+    const bool low = fr < 512 && !s_dumped;
+    if (level.time >= s_next || s_last < 0 || fr <= s_last - 256 || low)
+    {
+        s_next = level.time + 5000; s_last = fr;
+        H5P_XAnimDiagPrint(low);
+        if (low) s_dumped = true;
+    }
+}
+// rt2.cpp h0_segv (SIGABRT del stub de FS_FOpenTextFileWrite tras "exceeded maximum number of anim info"): reparto final y arbol mayor
+void H5P_CrashDiag()
+{
+    static const bool on = getenv("H5_XADIAG") && atoi(getenv("H5_XADIAG"));
+    if (on && H5P_XAnimInfoFree() < 64) H5P_XAnimDiagPrint(true);
+}
+
 static void H5F_AfterServerFrame()
 {
     if (!s_active) return;
@@ -405,9 +467,10 @@ static void H5F_AfterServerFrame()
     if (level.time >= s_fNextLog)
     {
         s_fNextLog = level.time + 5000;
-        fprintf(stderr, "[H5F] t=%d ronda %d | zombis vivos %d por salir %d | puntos %d | %s %d/%d | salud %d%s%s\n", level.time, n.round, n.alive, n.total,
-            n.score, n.weapon ? BG_WeaponName(n.weapon) : "-", n.clip, n.stock, n.health, n.laststand ? " ABATIDO" : "", n.qr ? " QR" : "");
+        fprintf(stderr, "[H5F] t=%d ronda %d | zombis vivos %d por salir %d | puntos %d | %s %d/%d | salud %d%s%s | XAnimInfo libres %d\n", level.time, n.round, n.alive, n.total,
+            n.score, n.weapon ? BG_WeaponName(n.weapon) : "-", n.clip, n.stock, n.health, n.laststand ? " ABATIDO" : "", n.qr ? " QR" : "", H5P_XAnimInfoFree());
     }
+    H5P_XAnimDiag();
     s_f = n;
 }
 
